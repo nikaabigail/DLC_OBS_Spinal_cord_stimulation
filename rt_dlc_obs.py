@@ -3,11 +3,14 @@ from __future__ import annotations
 import csv
 import logging
 import math
+import logging
 import time
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
+from queue import Empty, Full, Queue
+from threading import Event, Lock, Thread
 from typing import Optional
 
 import cv2
@@ -157,6 +160,31 @@ def crop_roi(frame: np.ndarray) -> np.ndarray:
     return frame[y1:y2, x1:x2]
 
 
+def detect_content_roi(
+    frame: np.ndarray,
+    black_thresh: int = 12,
+    min_row_fill: float = 0.08,
+    min_col_fill: float = 0.03,
+) -> tuple[int, int, int, int] | None:
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    mask = gray > black_thresh
+
+    row_fill = mask.mean(axis=1)
+    col_fill = mask.mean(axis=0)
+
+    row_idx = np.where(row_fill >= min_row_fill)[0]
+    col_idx = np.where(col_fill >= min_col_fill)[0]
+    if len(row_idx) == 0 or len(col_idx) == 0:
+        return None
+
+    y1, y2 = int(row_idx.min()), int(row_idx.max()) + 1
+    x1, x2 = int(col_idx.min()), int(col_idx.max()) + 1
+
+    if x2 - x1 < 32 or y2 - y1 < 32:
+        return None
+    return x1, y1, x2, y2
+
+
 def resize_for_infer(frame: np.ndarray) -> np.ndarray:
     return cv2.resize(frame, (config.INFER_W, config.INFER_H), interpolation=cv2.INTER_LINEAR)
 
@@ -212,6 +240,59 @@ def map_points_from_infer_to_display(
             "likelihood": l,
         }
     return mapped
+
+
+def validate_runtime_config() -> None:
+    if config.INFER_W <= 0 or config.INFER_H <= 0:
+        raise ValueError("INFER_W and INFER_H must be positive.")
+    if config.SHOW_SCALE <= 0:
+        raise ValueError("SHOW_SCALE must be positive.")
+    if config.DESPIKE_THRESHOLD_PX <= 0:
+        raise ValueError("DESPIKE_THRESHOLD_PX must be positive.")
+    if config.MAX_HOLD_FRAMES < 0:
+        raise ValueError("MAX_HOLD_FRAMES must be >= 0.")
+    if config.MEDIAN_WINDOW <= 0:
+        raise ValueError("MEDIAN_WINDOW must be positive.")
+    if not (0.0 <= config.CONF_THRESH_USE <= 1.0):
+        raise ValueError("CONF_THRESH_USE must be in [0, 1].")
+    if not (0.0 <= config.CONF_THRESH_DRAW <= 1.0):
+        raise ValueError("CONF_THRESH_DRAW must be in [0, 1].")
+    if getattr(config, "USE_ROI", False):
+        roi = getattr(config, "ROI", None)
+        if not (isinstance(roi, tuple) and len(roi) == 4 and all(isinstance(v, int) for v in roi)):
+            raise ValueError("ROI must be a tuple of 4 integers: (x1, y1, x2, y2).")
+    if getattr(config, "INFER_QUEUE_MAXSIZE", 2) <= 0:
+        raise ValueError("INFER_QUEUE_MAXSIZE must be positive.")
+    if getattr(config, "DISPLAY_DELAY_MS", 0) < 0:
+        raise ValueError("DISPLAY_DELAY_MS must be >= 0.")
+    if getattr(config, "MAX_RESULT_HISTORY", 10) <= 0:
+        raise ValueError("MAX_RESULT_HISTORY must be positive.")
+    if getattr(config, "INFER_EVERY_N_FRAMES", 1) <= 0:
+        raise ValueError("INFER_EVERY_N_FRAMES must be positive.")
+    if getattr(config, "TARGET_INFER_FPS", 1.0) <= 0:
+        raise ValueError("TARGET_INFER_FPS must be positive.")
+
+
+def setup_logger() -> logging.Logger:
+    logger = logging.getLogger("rt_dlc")
+    if logger.handlers:
+        return logger
+
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+
+    sh = logging.StreamHandler()
+    sh.setFormatter(formatter)
+    logger.addHandler(sh)
+
+    try:
+        fh = logging.FileHandler(config.LOG_PATH, encoding="utf-8")
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+    except Exception as exc:
+        logger.warning("Cannot open log file %s: %s", getattr(config, "LOG_PATH", ""), exc)
+
+    return logger
 
 
 # =========================
@@ -280,6 +361,25 @@ class OnlinePointFilter:
                 return x_med, y_med, float(config.CONF_THRESH_USE + 0.01)
 
         return None, None, None
+
+
+@dataclass
+class InferJob:
+    frame_idx: int
+    infer_frame: np.ndarray
+    roi_shape: tuple[int, int]
+    infer_shape: tuple[int, int]
+    roi_offset: tuple[int, int]
+
+
+@dataclass
+class InferResult:
+    frame_idx: int
+    points: dict[str, dict[str, float | None]]
+    roi_shape: tuple[int, int]
+    infer_shape: tuple[int, int]
+    roi_offset: tuple[int, int]
+    ts: float
 
 
 # =========================
@@ -366,6 +466,27 @@ class DLCRealtimePredictor:
                 "likelihood": float(poses[idx, 2]),
             }
         return points
+
+    @staticmethod
+    def _normalize_poses(poses_raw: object) -> np.ndarray:
+        poses = np.asarray(poses_raw)
+
+        # Частый случай DLC: batch из 1 элемента -> (1, N, 3)
+        if poses.ndim == 3 and poses.shape[0] == 1:
+            poses = poses[0]
+        # Реже: (N, 1, 3)
+        elif poses.ndim == 3 and poses.shape[1] == 1:
+            poses = poses[:, 0, :]
+        # Совсем вырожденный случай: (3,) для одной точки
+        elif poses.ndim == 1 and poses.shape[0] >= 3:
+            poses = poses.reshape(1, -1)
+
+        if poses.ndim != 2 or poses.shape[1] < 3:
+            raise RuntimeError(
+                f"Unexpected poses shape: {poses.shape}. Expected [N,3] or [1,N,3]."
+            )
+
+        return poses
 
 
 # =========================
