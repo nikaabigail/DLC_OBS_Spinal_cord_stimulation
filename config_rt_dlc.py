@@ -4,6 +4,10 @@ from pathlib import Path
 # Video / OBS
 # =========================
 CAM_INDEX = 2
+USE_VIDEO_FILE = False
+VIDEO_FILE_PATH = r"C:\dlc\videos\input.mp4"
+VIDEO_TARGET_FPS = 60.0
+VIDEO_SKIP_IF_BEHIND = True
 FRAME_W = 1920
 FRAME_H = 1080  
 TARGET_VIDEO_FPS = 100.0

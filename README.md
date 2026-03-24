@@ -63,10 +63,14 @@ python run_dlc.py metrics
 python rt_dlc_obs.py
 ```
 
+Новый realtime-пайплайн работает **без OBS Virtual Camera**: источник кадров выбирается в `config_rt_dlc.py` через `USE_VIDEO_FILE`:
+- `USE_VIDEO_FILE=False` → `CameraSource`
+- `USE_VIDEO_FILE=True` → `VideoFileSource` (с pacing по `VIDEO_TARGET_FPS`)
+
 Для потока 100 FPS в realtime:
-- включен асинхронный конвейер с разделением на capture thread + inference thread + render loop,
-- используется маленькая очередь инференса (`INFER_QUEUE_MAXSIZE`) с anti-backlog стратегией (берется самый свежий кадр),
-- можно включать небольшую задержку вывода (`DISPLAY_DELAY_MS`), чтобы keypoints визуально совпадали с кадром.
+- включен strict latest-frame режим без накопления буферов,
+- для video source есть pacing (`VIDEO_TARGET_FPS`) и optional skip when behind (`VIDEO_SKIP_IF_BEHIND`),
+- инференс контролируется admission-гейтами (`INFER_EVERY_N_FRAMES`, `TARGET_INFER_FPS`).
 
 Тюнинг для скорости/точности смотрите в `config_rt_dlc.py`:
 - `INFER_W/INFER_H` (главный рычаг производительности),
