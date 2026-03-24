@@ -4,26 +4,37 @@ from pathlib import Path
 # Video / OBS
 # =========================
 CAM_INDEX = 2
+USE_VIDEO_FILE = False
+VIDEO_FILE_PATH = r"C:\dlc\videos\input.mp4"
+VIDEO_TARGET_FPS = 60.0
+VIDEO_SKIP_IF_BEHIND = True
 FRAME_W = 1920
 FRAME_H = 1080  
-TARGET_VIDEO_FPS = 60.0
+TARGET_VIDEO_FPS = 100.0
 SHOW_SCALE = 0.8
 AUTO_START_ON_MOTION = True
 FRAME_DIFF_THRESHOLD = 0.5
 
-SKIP_NEAR_DUPLICATE_FRAMES = True
+SKIP_NEAR_DUPLICATE_FRAMES = False
 DUPLICATE_FRAME_THRESHOLD = 0.15  # средняя разница по grayscale для infer-frame
+SUPPRESS_LOW_MOTION = True
+LOW_MOTION_THRESHOLD = 0.20
 
 SHOW_FULL_FRAME = True
+DISPLAY_BUFFER_MS = 100
+MAX_FRAME_BUFFER = 256
+MAX_PRED_BUFFER = 256
 
 # Размер кадра, который подаем в DLC
 # Для боковой дорожки обычно разумно сначала резать ROI, потом уменьшать.
-INFER_W = 960
-INFER_H = 220
+INFER_W = 640
+INFER_H = 160
+INFER_EVERY_N_FRAMES = 2        # жесткий throttling: инференс не на каждый кадр
+TARGET_INFER_FPS = 35.0         # дополнительный лимит частоты запуска инференса
 
 # ROI на исходном OBS-кадре (если нужно вырезать дорожку с мышью)
 # Формат: x1, y1, x2, y2
-USE_ROI = False
+USE_ROI = True
 ROI = (0, 430, 1920, 649)
 
 # =========================
@@ -54,15 +65,24 @@ USE_POINTS = [
 ]
 
 # Для отрисовки
-CONF_THRESH_DRAW = 0.6
+CONF_THRESH_DRAW = 0.3
 
 # =========================
 # Online filtering
 # =========================
-CONF_THRESH_USE = 0.6
-DESPIKE_THRESHOLD_PX = 80.0     # online threshold
-MAX_HOLD_FRAMES = 3             # сколько кадров держим последнюю хорошую точку
-MEDIAN_WINDOW = 5               # online median window по x/y
+CONF_THRESH_USE = 0.3
+DESPIKE_THRESHOLD_PX = 140.0    # online threshold
+MAX_HOLD_FRAMES = 6             # сколько кадров держим последнюю хорошую точку
+MEDIAN_WINDOW = 3               # online median window по x/y
+ENABLE_PCUTOFF = True
+ENABLE_DESPIKE = True
+ENABLE_HOLD = True
+
+# Логи / диагностика
+LOG_PATH = Path(r"C:\dlc\DLC_OBS_Spinal_cord_stimulation\rt_dlc_debug.log")
+LOG_EVERY_N_FRAMES = 30
+BENCHMARK_CSV_PATH = Path(r"C:\dlc\DLC_OBS_Spinal_cord_stimulation\rt_dlc_benchmark.csv")
+ENABLE_BENCHMARK_LOG_ROW = True
 
 # =========================
 # Feature extraction
