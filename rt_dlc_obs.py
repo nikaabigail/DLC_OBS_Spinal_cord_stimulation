@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import math
+import logging
 import time
+import csv
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
+from queue import Empty, Full, Queue
+from threading import Event, Lock, Thread
 from typing import Optional
 
 import cv2
@@ -13,7 +17,6 @@ import torch
 import yaml
 
 import config_rt_dlc as config
-from realtime_buses import FramePacket, KeypointPacket, LatestBus
 
 
 # =========================
@@ -23,7 +26,38 @@ def crop_roi(frame: np.ndarray) -> np.ndarray:
     if not config.USE_ROI:
         return frame
     x1, y1, x2, y2 = config.ROI
+    h, w = frame.shape[:2]
+    if not (0 <= x1 < x2 <= w and 0 <= y1 < y2 <= h):
+        raise ValueError(
+            f"Invalid ROI={config.ROI} for frame size {(w, h)}. "
+            "Expected 0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height."
+        )
     return frame[y1:y2, x1:x2]
+
+
+def detect_content_roi(
+    frame: np.ndarray,
+    black_thresh: int = 12,
+    min_row_fill: float = 0.08,
+    min_col_fill: float = 0.03,
+) -> tuple[int, int, int, int] | None:
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    mask = gray > black_thresh
+
+    row_fill = mask.mean(axis=1)
+    col_fill = mask.mean(axis=0)
+
+    row_idx = np.where(row_fill >= min_row_fill)[0]
+    col_idx = np.where(col_fill >= min_col_fill)[0]
+    if len(row_idx) == 0 or len(col_idx) == 0:
+        return None
+
+    y1, y2 = int(row_idx.min()), int(row_idx.max()) + 1
+    x1, x2 = int(col_idx.min()), int(col_idx.max()) + 1
+
+    if x2 - x1 < 32 or y2 - y1 < 32:
+        return None
+    return x1, y1, x2, y2
 
 
 def resize_for_infer(frame: np.ndarray) -> np.ndarray:
@@ -94,6 +128,59 @@ def map_points_from_infer_to_display(
     return mapped
 
 
+def validate_runtime_config() -> None:
+    if config.INFER_W <= 0 or config.INFER_H <= 0:
+        raise ValueError("INFER_W and INFER_H must be positive.")
+    if config.SHOW_SCALE <= 0:
+        raise ValueError("SHOW_SCALE must be positive.")
+    if config.DESPIKE_THRESHOLD_PX <= 0:
+        raise ValueError("DESPIKE_THRESHOLD_PX must be positive.")
+    if config.MAX_HOLD_FRAMES < 0:
+        raise ValueError("MAX_HOLD_FRAMES must be >= 0.")
+    if config.MEDIAN_WINDOW <= 0:
+        raise ValueError("MEDIAN_WINDOW must be positive.")
+    if not (0.0 <= config.CONF_THRESH_USE <= 1.0):
+        raise ValueError("CONF_THRESH_USE must be in [0, 1].")
+    if not (0.0 <= config.CONF_THRESH_DRAW <= 1.0):
+        raise ValueError("CONF_THRESH_DRAW must be in [0, 1].")
+    if getattr(config, "USE_ROI", False):
+        roi = getattr(config, "ROI", None)
+        if not (isinstance(roi, tuple) and len(roi) == 4 and all(isinstance(v, int) for v in roi)):
+            raise ValueError("ROI must be a tuple of 4 integers: (x1, y1, x2, y2).")
+    if getattr(config, "INFER_QUEUE_MAXSIZE", 2) <= 0:
+        raise ValueError("INFER_QUEUE_MAXSIZE must be positive.")
+    if getattr(config, "DISPLAY_DELAY_MS", 0) < 0:
+        raise ValueError("DISPLAY_DELAY_MS must be >= 0.")
+    if getattr(config, "MAX_RESULT_HISTORY", 10) <= 0:
+        raise ValueError("MAX_RESULT_HISTORY must be positive.")
+    if getattr(config, "INFER_EVERY_N_FRAMES", 1) <= 0:
+        raise ValueError("INFER_EVERY_N_FRAMES must be positive.")
+    if getattr(config, "TARGET_INFER_FPS", 1.0) <= 0:
+        raise ValueError("TARGET_INFER_FPS must be positive.")
+
+
+def setup_logger() -> logging.Logger:
+    logger = logging.getLogger("rt_dlc")
+    if logger.handlers:
+        return logger
+
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+
+    sh = logging.StreamHandler()
+    sh.setFormatter(formatter)
+    logger.addHandler(sh)
+
+    try:
+        fh = logging.FileHandler(config.LOG_PATH, encoding="utf-8")
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+    except Exception as exc:
+        logger.warning("Cannot open log file %s: %s", getattr(config, "LOG_PATH", ""), exc)
+
+    return logger
+
+
 # =========================
 # Online point filter
 # =========================
@@ -129,10 +216,13 @@ class OnlinePointFilter:
             x is not None
             and y is not None
             and likelihood is not None
-            and likelihood >= config.CONF_THRESH_USE
+            and (
+                (not getattr(config, "ENABLE_PCUTOFF", True))
+                or likelihood >= config.CONF_THRESH_USE
+            )
         )
 
-        if is_good:
+        if is_good and getattr(config, "ENABLE_DESPIKE", True):
             current_xy = (float(x), float(y))
             if state.last_good_xy is not None:
                 jump = dist2d(current_xy, state.last_good_xy)
@@ -151,7 +241,11 @@ class OnlinePointFilter:
             y_med = float(np.median(np.array(state.y_hist, dtype=np.float32)))
             return x_med, y_med, float(likelihood)
 
-        if state.last_good_xy is not None and state.last_good_frame_idx is not None:
+        if (
+            getattr(config, "ENABLE_HOLD", True)
+            and state.last_good_xy is not None
+            and state.last_good_frame_idx is not None
+        ):
             gap = frame_idx - state.last_good_frame_idx
             if gap <= config.MAX_HOLD_FRAMES:
                 hold_x, hold_y = state.last_good_xy
@@ -163,6 +257,25 @@ class OnlinePointFilter:
                 return x_med, y_med, float(config.CONF_THRESH_USE + 0.01)
 
         return None, None, None
+
+
+@dataclass
+class InferJob:
+    frame_idx: int
+    infer_frame: np.ndarray
+    roi_shape: tuple[int, int]
+    infer_shape: tuple[int, int]
+    roi_offset: tuple[int, int]
+
+
+@dataclass
+class InferResult:
+    frame_idx: int
+    points: dict[str, dict[str, float | None]]
+    roi_shape: tuple[int, int]
+    infer_shape: tuple[int, int]
+    roi_offset: tuple[int, int]
+    ts: float
 
 
 # =========================
@@ -181,6 +294,7 @@ class DLCRealtimePredictor:
         self.runner = None
         self.model_cfg: dict | None = None
         self.all_bodyparts: list[str] = []
+        self.bodypart_to_idx: dict[str, int] = {}
         self._init_predictor()
 
     def _init_predictor(self) -> None:
@@ -191,6 +305,7 @@ class DLCRealtimePredictor:
                 self.model_cfg = yaml.safe_load(f)
 
             self.all_bodyparts = list(self.model_cfg["metadata"]["bodyparts"])
+            self.bodypart_to_idx = {name: i for i, name in enumerate(self.all_bodyparts)}
             print("[INFO] Bodyparts order:", self.all_bodyparts)
 
             self.runner = get_pose_inference_runner(
@@ -232,15 +347,15 @@ class DLCRealtimePredictor:
                 f"Неожиданный формат pred output: type={type(raw0)}, repr={repr(raw0)[:500]}"
             )
 
-        poses = raw0["bodypart"]["poses"]
+        poses = self._normalize_poses(raw0["bodypart"]["poses"])
         points: dict[str, dict[str, float | None]] = {}
 
         for point_name in config.USE_POINTS:
-            if point_name not in self.all_bodyparts:
+            idx = self.bodypart_to_idx.get(point_name)
+            if idx is None:
                 points[point_name] = {"x": None, "y": None, "likelihood": None}
                 continue
 
-            idx = self.all_bodyparts.index(point_name)
             if idx >= len(poses):
                 points[point_name] = {"x": None, "y": None, "likelihood": None}
                 continue
@@ -252,6 +367,27 @@ class DLCRealtimePredictor:
             }
 
         return points
+
+    @staticmethod
+    def _normalize_poses(poses_raw: object) -> np.ndarray:
+        poses = np.asarray(poses_raw)
+
+        # Частый случай DLC: batch из 1 элемента -> (1, N, 3)
+        if poses.ndim == 3 and poses.shape[0] == 1:
+            poses = poses[0]
+        # Реже: (N, 1, 3)
+        elif poses.ndim == 3 and poses.shape[1] == 1:
+            poses = poses[:, 0, :]
+        # Совсем вырожденный случай: (3,) для одной точки
+        elif poses.ndim == 1 and poses.shape[0] >= 3:
+            poses = poses.reshape(1, -1)
+
+        if poses.ndim != 2 or poses.shape[1] < 3:
+            raise RuntimeError(
+                f"Unexpected poses shape: {poses.shape}. Expected [N,3] or [1,N,3]."
+            )
+
+        return poses
 
 
 # =========================
@@ -356,6 +492,9 @@ def draw_overlay(
 # Main loop
 # =========================
 def main() -> None:
+    validate_runtime_config()
+    logger = setup_logger()
+
     cap = cv2.VideoCapture(config.CAM_INDEX, cv2.CAP_DSHOW)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.FRAME_W)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.FRAME_H)
@@ -364,15 +503,32 @@ def main() -> None:
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open camera index {config.CAM_INDEX}")
 
+    actual_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    actual_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    actual_fps = cap.get(cv2.CAP_PROP_FPS)
+    logger.info(
+        "Camera opened: index=%s requested=(%sx%s @ %.1f) actual=(%.0fx%.0f @ %.1f)",
+        config.CAM_INDEX,
+        config.FRAME_W,
+        config.FRAME_H,
+        config.TARGET_VIDEO_FPS,
+        actual_w,
+        actual_h,
+        actual_fps,
+    )
+    if actual_fps > 0 and actual_fps < config.TARGET_VIDEO_FPS * 0.8:
+        logger.warning(
+            "Actual camera FPS is much lower than requested (%.1f vs %.1f). "
+            "Source/backend likely capped.",
+            actual_fps,
+            config.TARGET_VIDEO_FPS,
+        )
+
     predictor = DLCRealtimePredictor()
     point_filter = OnlinePointFilter()
 
-    frame_bus = LatestBus()
-    dlc_bus = LatestBus()
-
     frame_idx = 0
     prev_cam_ts: Optional[float] = None
-    prev_dlc_ts: Optional[float] = None
     prev_skip_ts: Optional[float] = None
     fps_cam = 0.0
     fps_dlc = 0.0
@@ -383,172 +539,492 @@ def main() -> None:
     motion_score = 0.0
     processing_active = not getattr(config, "AUTO_START_ON_MOTION", False)
 
-    last_processed_points: dict[str, dict[str, float | None]] = {
-        point_name: {"x": None, "y": None, "likelihood": None}
-        for point_name in config.USE_POINTS
+    infer_queue: Queue[InferJob] = Queue(maxsize=config.INFER_QUEUE_MAXSIZE)
+    capture_queue: Queue[tuple[np.ndarray, float]] = Queue(maxsize=2)
+    result_lock = Lock()
+    stop_event = Event()
+    latest_result: Optional[InferResult] = None
+    results_by_frame: dict[int, InferResult] = {}
+
+    display_delay_frames = int(round(
+        getattr(config, "DISPLAY_DELAY_MS", 0) / 1000.0 * max(1.0, config.TARGET_VIDEO_FPS)
+    ))
+    frame_buffer: deque[tuple[int, np.ndarray, tuple[int, int], tuple[int, int], tuple[int, int], float, bool, float]] = deque()
+    stats = {
+        "infer_jobs": 0,
+        "infer_frames": 0,
+        "exact_match": 0,
+        "fallback_match": 0,
+        "empty_match": 0,
+        "raw_visible_points": 0,
+        "filtered_visible_points": 0,
+        "total_points": 0,
+        "skip_duplicate": 0,
+        "skip_low_motion": 0,
+        "skip_throttle_n": 0,
+        "skip_throttle_fps": 0,
+        "fallback_streak": 0,
+        "fallback_streak_max": 0,
+        "timing_capture_ms": 0.0,
+        "timing_preprocess_ms": 0.0,
+        "timing_infer_ms": 0.0,
+        "timing_post_ms": 0.0,
+        "timing_draw_ms": 0.0,
+        "timing_display_ms": 0.0,
+        "latency_ms_sum": 0.0,
+        "latency_count": 0,
     }
+    likelihood_hist = [0, 0, 0, 0, 0]  # [<0.2, <0.4, <0.6, <0.8, >=0.8]
+    bodypart_lik_sum: dict[str, float] = defaultdict(float)
+    bodypart_lik_cnt: dict[str, int] = defaultdict(int)
+    last_infer_submit_ts = 0.0
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("[WARN] Empty frame from OBS camera.")
-            break
+    def infer_worker() -> None:
+        nonlocal fps_dlc, latest_result
+        prev_dlc_ts_local: Optional[float] = None
 
-        ts_frame = time.time()
-        if prev_cam_ts is not None:
-            dt = ts_frame - prev_cam_ts
-            if dt > 0:
-                fps_cam = 1.0 / dt
-        prev_cam_ts = ts_frame
+        while not stop_event.is_set():
+            try:
+                job = infer_queue.get(timeout=0.1)
+            except Empty:
+                continue
 
-        frame_idx += 1
-        frame_bus.put(FramePacket(frame=frame, ts=ts_frame, frame_idx=frame_idx))
+            # Anti-backlog: берем самый свежий кадр.
+            while True:
+                try:
+                    job = infer_queue.get_nowait()
+                except Empty:
+                    break
 
-        # ROI + infer image
-        if config.USE_ROI:
-            x1, y1, x2, y2 = config.ROI
-            roi_offset = (x1, y1)
-        else:
-            roi_offset = (0, 0)
+            t_infer0 = time.perf_counter()
+            raw_points = predictor.predict_frame(job.infer_frame)
+            stats["timing_infer_ms"] += (time.perf_counter() - t_infer0) * 1000.0
+            stats["infer_frames"] += 1
 
-        roi = crop_roi(frame)
-        infer_frame = resize_for_infer(roi)
+            processed_points: dict[str, dict[str, float | None]] = {}
+            t_post0 = time.perf_counter()
+            for point_name, p in raw_points.items():
+                raw_l = p.get("likelihood")
+                if raw_l is not None:
+                    bodypart_lik_sum[point_name] += float(raw_l)
+                    bodypart_lik_cnt[point_name] += 1
+                    if raw_l < 0.2:
+                        likelihood_hist[0] += 1
+                    elif raw_l < 0.4:
+                        likelihood_hist[1] += 1
+                    elif raw_l < 0.6:
+                        likelihood_hist[2] += 1
+                    elif raw_l < 0.8:
+                        likelihood_hist[3] += 1
+                    else:
+                        likelihood_hist[4] += 1
+                    if raw_l >= config.CONF_THRESH_DRAW:
+                        stats["raw_visible_points"] += 1
+                x, y, l = point_filter.process_point(
+                    name=point_name,
+                    x=p["x"],
+                    y=p["y"],
+                    likelihood=p["likelihood"],
+                    frame_idx=job.frame_idx,
+                )
+                processed_points[point_name] = {"x": x, "y": y, "likelihood": l}
+                stats["total_points"] += 1
+                if x is not None and y is not None and l is not None and l >= config.CONF_THRESH_DRAW:
+                    stats["filtered_visible_points"] += 1
+            stats["timing_post_ms"] += (time.perf_counter() - t_post0) * 1000.0
 
-        # Motion-based auto-start on OBS Play
-        if getattr(config, "AUTO_START_ON_MOTION", False):
-            gray_small = cv2.cvtColor(infer_frame, cv2.COLOR_BGR2GRAY)
-
-            if prev_gray_for_motion is None:
-                prev_gray_for_motion = gray_small
-            else:
-                diff = cv2.absdiff(gray_small, prev_gray_for_motion)
-                motion_score = float(diff.mean())
-                prev_gray_for_motion = gray_small
-
-                if (
-                    not processing_active
-                    and motion_score > getattr(config, "FRAME_DIFF_THRESHOLD", 0.5)
-                ):
-                    processing_active = True
-                    print(
-                        f"[INFO] Playback detected. Starting DLC processing. "
-                        f"motion_score={motion_score:.3f}"
-                    )
-
-        # Decide whether to run DLC or reuse last result on duplicate frames
-        run_dlc = processing_active
-        if processing_active and getattr(config, "SKIP_NEAR_DUPLICATE_FRAMES", True):
-            gray_dup = cv2.cvtColor(infer_frame, cv2.COLOR_BGR2GRAY)
-            if prev_gray_for_dup is None:
-                prev_gray_for_dup = gray_dup
-            else:
-                dup_diff = cv2.absdiff(gray_dup, prev_gray_for_dup)
-                dup_score = float(dup_diff.mean())
-
-                if dup_score < getattr(config, "DUPLICATE_FRAME_THRESHOLD", 0.15):
-                    run_dlc = False
-                    t_skip = time.time()
-                    if prev_skip_ts is not None:
-                        dt = t_skip - prev_skip_ts
-                        if dt > 0:
-                            fps_skip = 1.0 / dt
-                    prev_skip_ts = t_skip
-                else:
-                    prev_gray_for_dup = gray_dup
-
-        # Inference or reuse
-        if run_dlc:
-            raw_points = predictor.predict_frame(infer_frame)
-            last_processed_points = raw_points
-            t1 = time.time()
-
-            if prev_dlc_ts is not None:
-                dt = t1 - prev_dlc_ts
+            t_done = time.time()
+            if prev_dlc_ts_local is not None:
+                dt = t_done - prev_dlc_ts_local
                 if dt > 0:
                     fps_dlc = 1.0 / dt
-            prev_dlc_ts = t1
-        elif processing_active:
-            raw_points = last_processed_points
-            t1 = time.time()
-        else:
-            raw_points = {
-                point_name: {"x": None, "y": None, "likelihood": None}
-                for point_name in config.USE_POINTS
-            }
-            t1 = time.time()
+            prev_dlc_ts_local = t_done
 
-        processed_points: dict[str, dict[str, float | None]] = {}
-        for point_name, p in raw_points.items():
-            x, y, l = point_filter.process_point(
-                name=point_name,
-                x=p["x"],
-                y=p["y"],
-                likelihood=p["likelihood"],
-                frame_idx=frame_idx,
+            result = InferResult(
+                frame_idx=job.frame_idx,
+                points=processed_points,
+                roi_shape=job.roi_shape,
+                infer_shape=job.infer_shape,
+                roi_offset=job.roi_offset,
+                ts=t_done,
             )
-            processed_points[point_name] = {"x": x, "y": y, "likelihood": l}
 
-        dlc_bus.put(KeypointPacket(points=processed_points, ts=t1, frame_idx=frame_idx))
+            with result_lock:
+                latest_result = result
+                results_by_frame[job.frame_idx] = result
+                if len(results_by_frame) > config.MAX_RESULT_HISTORY:
+                    for old_idx in sorted(results_by_frame.keys())[: len(results_by_frame) - config.MAX_RESULT_HISTORY]:
+                        del results_by_frame[old_idx]
 
-        hind_angle = None
-        if processing_active and config.COMPUTE_HIND_ANGLE:
-            p1, p2, p3 = config.HIND_ANGLE_POINTS
-            a = processed_points.get(p1)
-            b = processed_points.get(p2)
-            c = processed_points.get(p3)
+    worker = Thread(target=infer_worker, name="dlc-infer-worker", daemon=True)
+    worker.start()
 
-            if a and b and c:
-                if (
-                    a["x"] is not None and a["y"] is not None
-                    and b["x"] is not None and b["y"] is not None
-                    and c["x"] is not None and c["y"] is not None
-                ):
-                    hind_angle = safe_angle_deg(
-                        (float(a["x"]), float(a["y"])),
-                        (float(b["x"]), float(b["y"])),
-                        (float(c["x"]), float(c["y"])),
-                    )
+    def capture_worker() -> None:
+        while not stop_event.is_set():
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            ts = time.time()
+            try:
+                capture_queue.put_nowait((frame, ts))
+            except Full:
+                try:
+                    _ = capture_queue.get_nowait()
+                except Empty:
+                    pass
+                capture_queue.put_nowait((frame, ts))
 
-        # Отрисовка на полном кадре
-        if getattr(config, "SHOW_FULL_FRAME", True):
-            display_points = map_points_from_infer_to_display(
-                processed_points,
-                roi_shape=(roi.shape[0], roi.shape[1]),
-                infer_shape=(infer_frame.shape[0], infer_frame.shape[1]),
-                roi_offset=roi_offset,
+    capture_thread = Thread(target=capture_worker, name="capture-worker", daemon=True)
+    capture_thread.start()
+
+    try:
+        while True:
+            t_capture0 = time.perf_counter()
+            try:
+                frame, ts_frame = capture_queue.get(timeout=1.0)
+            except Empty:
+                logger.warning("Capture queue timeout: no frames.")
+                continue
+            stats["timing_capture_ms"] += (time.perf_counter() - t_capture0) * 1000.0
+
+            if prev_cam_ts is not None:
+                dt = ts_frame - prev_cam_ts
+                if dt > 0:
+                    fps_cam = 1.0 / dt
+            prev_cam_ts = ts_frame
+
+            frame_idx += 1
+
+            if getattr(config, "FORCE_FIXED_ROI", False):
+                config.USE_ROI = True
+
+            if config.USE_ROI:
+                x1, y1, x2, y2 = config.ROI
+                roi_offset = (x1, y1)
+            else:
+                roi_offset = (0, 0)
+
+            if (
+                frame_idx == 1
+                and not getattr(config, "FORCE_FIXED_ROI", False)
+                and getattr(config, "AUTO_DETECT_CONTENT_ROI", False)
+            ):
+                auto_roi = detect_content_roi(
+                    frame,
+                    black_thresh=getattr(config, "CONTENT_BLACK_THRESH", 12),
+                    min_row_fill=getattr(config, "CONTENT_MIN_ROW_FILL", 0.08),
+                    min_col_fill=getattr(config, "CONTENT_MIN_COL_FILL", 0.03),
+                )
+                if auto_roi is not None:
+                    config.ROI = auto_roi
+                    config.USE_ROI = True
+                    x1, y1, x2, y2 = config.ROI
+                    roi_offset = (x1, y1)
+                    logger.info("AUTO_DETECT_CONTENT_ROI enabled. Using ROI=%s", config.ROI)
+                else:
+                    logger.warning("AUTO_DETECT_CONTENT_ROI could not find content. Keeping configured ROI.")
+
+            t_pre0 = time.perf_counter()
+            roi = crop_roi(frame)
+            infer_frame = resize_for_infer(roi)
+            stats["timing_preprocess_ms"] += (time.perf_counter() - t_pre0) * 1000.0
+
+            if getattr(config, "AUTO_START_ON_MOTION", False):
+                gray_small = cv2.cvtColor(infer_frame, cv2.COLOR_BGR2GRAY)
+                if prev_gray_for_motion is None:
+                    prev_gray_for_motion = gray_small
+                else:
+                    diff = cv2.absdiff(gray_small, prev_gray_for_motion)
+                    motion_score = float(diff.mean())
+                    prev_gray_for_motion = gray_small
+
+                    if (
+                        not processing_active
+                        and motion_score > getattr(config, "FRAME_DIFF_THRESHOLD", 0.5)
+                    ):
+                        processing_active = True
+                        print(
+                            f"[INFO] Playback detected. Starting DLC processing. "
+                            f"motion_score={motion_score:.3f}"
+                        )
+
+            run_dlc = processing_active
+            if processing_active and getattr(config, "SKIP_NEAR_DUPLICATE_FRAMES", True):
+                gray_dup = cv2.cvtColor(infer_frame, cv2.COLOR_BGR2GRAY)
+                if prev_gray_for_dup is None:
+                    prev_gray_for_dup = gray_dup
+                else:
+                    dup_diff = cv2.absdiff(gray_dup, prev_gray_for_dup)
+                    dup_score = float(dup_diff.mean())
+
+                    if dup_score < getattr(config, "DUPLICATE_FRAME_THRESHOLD", 0.15):
+                        run_dlc = False
+                        stats["skip_duplicate"] += 1
+                        t_skip = time.time()
+                        if prev_skip_ts is not None:
+                            dt = t_skip - prev_skip_ts
+                            if dt > 0:
+                                fps_skip = 1.0 / dt
+                        prev_skip_ts = t_skip
+                    else:
+                        prev_gray_for_dup = gray_dup
+
+            if run_dlc and getattr(config, "SUPPRESS_LOW_MOTION", False):
+                if motion_score < getattr(config, "LOW_MOTION_THRESHOLD", 0.20):
+                    run_dlc = False
+                    stats["skip_low_motion"] += 1
+
+            if run_dlc and frame_idx % max(1, getattr(config, "INFER_EVERY_N_FRAMES", 1)) != 0:
+                run_dlc = False
+                stats["skip_throttle_n"] += 1
+
+            if run_dlc:
+                now_ts = time.time()
+                min_dt = 1.0 / float(getattr(config, "TARGET_INFER_FPS", 35.0))
+                if (now_ts - last_infer_submit_ts) < min_dt:
+                    run_dlc = False
+                    stats["skip_throttle_fps"] += 1
+
+            if run_dlc:
+                job = InferJob(
+                    frame_idx=frame_idx,
+                    infer_frame=infer_frame.copy(),
+                    roi_shape=(roi.shape[0], roi.shape[1]),
+                    infer_shape=(infer_frame.shape[0], infer_frame.shape[1]),
+                    roi_offset=roi_offset,
+                )
+                try:
+                    infer_queue.put_nowait(job)
+                    stats["infer_jobs"] += 1
+                    last_infer_submit_ts = time.time()
+                except Full:
+                    try:
+                        _ = infer_queue.get_nowait()
+                    except Empty:
+                        pass
+                    infer_queue.put_nowait(job)
+                    stats["infer_jobs"] += 1
+                    last_infer_submit_ts = time.time()
+
+            frame_buffer.append(
+                (
+                    frame_idx,
+                    frame.copy(),
+                    (roi.shape[0], roi.shape[1]),
+                    (infer_frame.shape[0], infer_frame.shape[1]),
+                    roi_offset,
+                    motion_score,
+                    processing_active,
+                    ts_frame,
+                )
             )
-            display = frame.copy()
-        else:
-            display_points = processed_points
-            display = infer_frame.copy()
 
-        display = draw_overlay(
-            display,
-            display_points,
-            fps_cam,
-            fps_dlc,
-            fps_skip,
-            hind_angle,
-            processing_active,
-            motion_score,
-        )
+            if len(frame_buffer) <= display_delay_frames:
+                continue
 
-        if config.SHOW_SCALE != 1.0:
-            display = cv2.resize(
+            disp_idx, disp_frame, disp_roi_shape, disp_infer_shape, disp_roi_offset, disp_motion, disp_active, disp_capture_ts = frame_buffer.popleft()
+            stats["latency_ms_sum"] += (time.time() - disp_capture_ts) * 1000.0
+            stats["latency_count"] += 1
+
+            with result_lock:
+                result_exact = results_by_frame.pop(disp_idx, None)
+                result_fallback = latest_result
+
+            if result_exact is not None:
+                processed_points = result_exact.points
+                map_meta = result_exact
+                stats["exact_match"] += 1
+                stats["fallback_streak"] = 0
+            elif result_fallback is not None and disp_active:
+                processed_points = result_fallback.points
+                map_meta = InferResult(
+                    frame_idx=disp_idx,
+                    points=processed_points,
+                    roi_shape=disp_roi_shape,
+                    infer_shape=disp_infer_shape,
+                    roi_offset=disp_roi_offset,
+                    ts=time.time(),
+                )
+                stats["fallback_match"] += 1
+                stats["fallback_streak"] += 1
+                stats["fallback_streak_max"] = max(stats["fallback_streak_max"], stats["fallback_streak"])
+            else:
+                processed_points = {
+                    point_name: {"x": None, "y": None, "likelihood": None}
+                    for point_name in config.USE_POINTS
+                }
+                map_meta = InferResult(
+                    frame_idx=disp_idx,
+                    points=processed_points,
+                    roi_shape=disp_roi_shape,
+                    infer_shape=disp_infer_shape,
+                    roi_offset=disp_roi_offset,
+                    ts=time.time(),
+                )
+                stats["empty_match"] += 1
+                stats["fallback_streak"] = 0
+
+            hind_angle = None
+            if disp_active and config.COMPUTE_HIND_ANGLE:
+                p1, p2, p3 = config.HIND_ANGLE_POINTS
+                a = processed_points.get(p1)
+                b = processed_points.get(p2)
+                c = processed_points.get(p3)
+
+                if a and b and c:
+                    if (
+                        a["x"] is not None and a["y"] is not None
+                        and b["x"] is not None and b["y"] is not None
+                        and c["x"] is not None and c["y"] is not None
+                    ):
+                        hind_angle = safe_angle_deg(
+                            (float(a["x"]), float(a["y"])),
+                            (float(b["x"]), float(b["y"])),
+                            (float(c["x"]), float(c["y"])),
+                        )
+
+            if getattr(config, "SHOW_FULL_FRAME", True):
+                display_points = map_points_from_infer_to_display(
+                    processed_points,
+                    roi_shape=map_meta.roi_shape,
+                    infer_shape=map_meta.infer_shape,
+                    roi_offset=map_meta.roi_offset,
+                )
+                display = disp_frame.copy()
+            else:
+                display_points = processed_points
+                display = resize_for_infer(crop_roi(disp_frame))
+
+            t_draw0 = time.perf_counter()
+            display = draw_overlay(
                 display,
-                None,
-                fx=config.SHOW_SCALE,
-                fy=config.SHOW_SCALE,
-                interpolation=cv2.INTER_AREA,
+                display_points,
+                fps_cam,
+                fps_dlc,
+                fps_skip,
+                hind_angle,
+                disp_active,
+                disp_motion,
             )
+            stats["timing_draw_ms"] += (time.perf_counter() - t_draw0) * 1000.0
 
-        cv2.imshow(config.WINDOW_NAME, display)
-        key = cv2.waitKey(1) & 0xFF
-        if key in (27, ord("q")):
-            break
+            if config.SHOW_SCALE != 1.0:
+                display = cv2.resize(
+                    display,
+                    None,
+                    fx=config.SHOW_SCALE,
+                    fy=config.SHOW_SCALE,
+                    interpolation=cv2.INTER_AREA,
+                )
 
-    cap.release()
-    cv2.destroyAllWindows()
+            t_disp0 = time.perf_counter()
+            cv2.imshow(config.WINDOW_NAME, display)
+            key = cv2.waitKey(1) & 0xFF
+            stats["timing_display_ms"] += (time.perf_counter() - t_disp0) * 1000.0
+            if key in (27, ord("q")):
+                break
+
+            if frame_idx % max(1, getattr(config, "LOG_EVERY_N_FRAMES", 30)) == 0:
+                raw_visibility = (
+                    stats["raw_visible_points"] / stats["total_points"] * 100.0
+                    if stats["total_points"] > 0
+                    else 0.0
+                )
+                filtered_visibility = (
+                    stats["filtered_visible_points"] / stats["total_points"] * 100.0
+                    if stats["total_points"] > 0
+                    else 0.0
+                )
+                latency_ms = (
+                    stats["latency_ms_sum"] / stats["latency_count"]
+                    if stats["latency_count"] > 0
+                    else 0.0
+                )
+                bp_summary = []
+                for bp in config.USE_POINTS:
+                    cnt = bodypart_lik_cnt.get(bp, 0)
+                    if cnt > 0:
+                        bp_summary.append(f"{bp}:{(bodypart_lik_sum[bp]/cnt):.2f}")
+                bp_summary_txt = ",".join(bp_summary)
+                logger.info(
+                    "frame=%d cam_fps=%.1f dlc_fps=%.1f skip_fps=%.1f q=%d "
+                    "jobs=%d infer=%d exact=%d fallback=%d empty=%d "
+                    "raw_visible=%.1f%% filtered_visible=%.1f%% "
+                    "skip_dup=%d skip_motion=%d skip_n=%d skip_fps=%d "
+                    "fallback_streak=%d/%d "
+                    "t_capture=%.2fms t_pre=%.2fms t_infer=%.2fms t_post=%.2fms t_draw=%.2fms t_disp=%.2fms "
+                    "latency=%.2fms hist=[%d,%d,%d,%d,%d] bp_lik={%s} "
+                    "motion=%.3f roi=%s infer=%sx%s",
+                    frame_idx,
+                    fps_cam,
+                    fps_dlc,
+                    fps_skip,
+                    infer_queue.qsize(),
+                    stats["infer_jobs"],
+                    stats["infer_frames"],
+                    stats["exact_match"],
+                    stats["fallback_match"],
+                    stats["empty_match"],
+                    raw_visibility,
+                    filtered_visibility,
+                    stats["skip_duplicate"],
+                    stats["skip_low_motion"],
+                    stats["skip_throttle_n"],
+                    stats["skip_throttle_fps"],
+                    stats["fallback_streak"],
+                    stats["fallback_streak_max"],
+                    stats["timing_capture_ms"] / frame_idx,
+                    stats["timing_preprocess_ms"] / frame_idx,
+                    stats["timing_infer_ms"] / max(1, stats["infer_frames"]),
+                    stats["timing_post_ms"] / max(1, stats["infer_frames"]),
+                    stats["timing_draw_ms"] / max(1, frame_idx - display_delay_frames),
+                    stats["timing_display_ms"] / max(1, frame_idx - display_delay_frames),
+                    latency_ms,
+                    likelihood_hist[0],
+                    likelihood_hist[1],
+                    likelihood_hist[2],
+                    likelihood_hist[3],
+                    likelihood_hist[4],
+                    bp_summary_txt,
+                    motion_score,
+                    config.ROI if config.USE_ROI else "full",
+                    config.INFER_W,
+                    config.INFER_H,
+                )
+
+                if getattr(config, "ENABLE_BENCHMARK_LOG_ROW", False):
+                    csv_path = getattr(config, "BENCHMARK_CSV_PATH", None)
+                    if csv_path:
+                        try:
+                            file_exists = Path(csv_path).exists()
+                            with open(csv_path, "a", newline="", encoding="utf-8") as f:
+                                w = csv.writer(f)
+                                if not file_exists:
+                                    w.writerow([
+                                        "frame", "cam_fps", "dlc_fps", "skip_fps", "queue", "jobs", "infer",
+                                        "exact", "fallback", "empty", "raw_visible_pct", "filtered_visible_pct",
+                                        "skip_dup", "skip_motion", "skip_n", "skip_fps", "fallback_streak",
+                                        "fallback_streak_max", "latency_ms", "hist_lt02", "hist_02_04", "hist_04_06",
+                                        "hist_06_08", "hist_ge08", "roi", "infer_w", "infer_h",
+                                    ])
+                                w.writerow([
+                                    frame_idx, round(fps_cam, 3), round(fps_dlc, 3), round(fps_skip, 3), infer_queue.qsize(),
+                                    stats["infer_jobs"], stats["infer_frames"], stats["exact_match"], stats["fallback_match"],
+                                    stats["empty_match"], round(raw_visibility, 3), round(filtered_visibility, 3),
+                                    stats["skip_duplicate"], stats["skip_low_motion"], stats["skip_throttle_n"],
+                                    stats["skip_throttle_fps"], stats["fallback_streak"], stats["fallback_streak_max"],
+                                    round(latency_ms, 3), likelihood_hist[0], likelihood_hist[1], likelihood_hist[2],
+                                    likelihood_hist[3], likelihood_hist[4], config.ROI if config.USE_ROI else "full",
+                                    config.INFER_W, config.INFER_H,
+                                ])
+                        except Exception as exc:
+                            logger.warning("Failed to append benchmark CSV row: %s", exc)
+    finally:
+        stop_event.set()
+        worker.join(timeout=1.0)
+        capture_thread.join(timeout=1.0)
+        cap.release()
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
