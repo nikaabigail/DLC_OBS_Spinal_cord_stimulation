@@ -1,0 +1,18 @@
+# Core
+numpy==1.26.4
+opencv-python==4.8.1.78
+pyyaml
+
+# DeepLabCut (PyTorch backend)
+deeplabcut==3.0.0rc13
+
+# Utility
+pandas
+matplotlib
+tqdm
+scikit-learn
+
+# Torch often should be installed separately for matching CUDA build:
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+# torch==2.1.2
+# torchvision==0.16.2
