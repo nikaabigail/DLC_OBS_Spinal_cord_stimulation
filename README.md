@@ -63,6 +63,17 @@ python run_dlc.py metrics
 python rt_dlc_obs.py
 ```
 
+Для потока 100 FPS в realtime:
+- включен асинхронный конвейер (capture/display и inference развязаны),
+- используется маленькая очередь инференса (`INFER_QUEUE_MAXSIZE`) с anti-backlog стратегией (берется самый свежий кадр),
+- можно включать небольшую задержку вывода (`DISPLAY_DELAY_MS`), чтобы keypoints визуально совпадали с кадром.
+
+Тюнинг для скорости/точности смотрите в `config_rt_dlc.py`:
+- `INFER_W/INFER_H` (главный рычаг производительности),
+- `DISPLAY_DELAY_MS`,
+- `SKIP_NEAR_DUPLICATE_FRAMES` и `DUPLICATE_FRAME_THRESHOLD`,
+- `INFER_QUEUE_MAXSIZE`.
+
 ## Что проверено и отполировано
 
 ### 1) Убраны неиспользуемые сущности
