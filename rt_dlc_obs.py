@@ -13,7 +13,6 @@ import torch
 import yaml
 
 import config_rt_dlc as config
-from realtime_buses import FramePacket, KeypointPacket, LatestBus
 
 
 # =========================
@@ -23,6 +22,12 @@ def crop_roi(frame: np.ndarray) -> np.ndarray:
     if not config.USE_ROI:
         return frame
     x1, y1, x2, y2 = config.ROI
+    h, w = frame.shape[:2]
+    if not (0 <= x1 < x2 <= w and 0 <= y1 < y2 <= h):
+        raise ValueError(
+            f"Invalid ROI={config.ROI} for frame size {(w, h)}. "
+            "Expected 0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height."
+        )
     return frame[y1:y2, x1:x2]
 
 
@@ -92,6 +97,27 @@ def map_points_from_infer_to_display(
             "likelihood": l,
         }
     return mapped
+
+
+def validate_runtime_config() -> None:
+    if config.INFER_W <= 0 or config.INFER_H <= 0:
+        raise ValueError("INFER_W and INFER_H must be positive.")
+    if config.SHOW_SCALE <= 0:
+        raise ValueError("SHOW_SCALE must be positive.")
+    if config.DESPIKE_THRESHOLD_PX <= 0:
+        raise ValueError("DESPIKE_THRESHOLD_PX must be positive.")
+    if config.MAX_HOLD_FRAMES < 0:
+        raise ValueError("MAX_HOLD_FRAMES must be >= 0.")
+    if config.MEDIAN_WINDOW <= 0:
+        raise ValueError("MEDIAN_WINDOW must be positive.")
+    if not (0.0 <= config.CONF_THRESH_USE <= 1.0):
+        raise ValueError("CONF_THRESH_USE must be in [0, 1].")
+    if not (0.0 <= config.CONF_THRESH_DRAW <= 1.0):
+        raise ValueError("CONF_THRESH_DRAW must be in [0, 1].")
+    if getattr(config, "USE_ROI", False):
+        roi = getattr(config, "ROI", None)
+        if not (isinstance(roi, tuple) and len(roi) == 4 and all(isinstance(v, int) for v in roi)):
+            raise ValueError("ROI must be a tuple of 4 integers: (x1, y1, x2, y2).")
 
 
 # =========================
@@ -356,6 +382,8 @@ def draw_overlay(
 # Main loop
 # =========================
 def main() -> None:
+    validate_runtime_config()
+
     cap = cv2.VideoCapture(config.CAM_INDEX, cv2.CAP_DSHOW)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.FRAME_W)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.FRAME_H)
@@ -366,9 +394,6 @@ def main() -> None:
 
     predictor = DLCRealtimePredictor()
     point_filter = OnlinePointFilter()
-
-    frame_bus = LatestBus()
-    dlc_bus = LatestBus()
 
     frame_idx = 0
     prev_cam_ts: Optional[float] = None
@@ -402,7 +427,6 @@ def main() -> None:
         prev_cam_ts = ts_frame
 
         frame_idx += 1
-        frame_bus.put(FramePacket(frame=frame, ts=ts_frame, frame_idx=frame_idx))
 
         # ROI + infer image
         if config.USE_ROI:
@@ -487,8 +511,6 @@ def main() -> None:
                 frame_idx=frame_idx,
             )
             processed_points[point_name] = {"x": x, "y": y, "likelihood": l}
-
-        dlc_bus.put(KeypointPacket(points=processed_points, ts=t1, frame_idx=frame_idx))
 
         hind_angle = None
         if processing_active and config.COMPUTE_HIND_ANGLE:

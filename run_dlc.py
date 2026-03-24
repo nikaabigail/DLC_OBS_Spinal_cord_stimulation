@@ -284,6 +284,23 @@ def existing_video_strings() -> list[str]:
     return existing
 
 
+def existing_video_paths() -> list[Path]:
+    existing = [v for v in VIDEOS if v.exists()]
+    if not existing:
+        raise FileNotFoundError("No videos found in VIDEOS.")
+    return existing
+
+
+def find_collected_data_pair(folder: Path) -> tuple[Path, Path] | None:
+    csv_candidates = sorted(folder.glob("CollectedData_*.csv"))
+    for csv_path in csv_candidates:
+        suffix = csv_path.stem.removeprefix("CollectedData_")
+        h5_path = folder / f"CollectedData_{suffix}.h5"
+        if h5_path.exists():
+            return csv_path, h5_path
+    return None
+
+
 def discover_labeled_video_sets() -> dict:
     """
     Собирает video_sets по всем папкам в labeled-data.
@@ -301,9 +318,8 @@ def discover_labeled_video_sets() -> dict:
             continue
 
         # Берем только реально размеченные папки
-        csv_path = folder / "CollectedData_og.csv"
-        h5_path = folder / "CollectedData_og.h5"
-        if not (csv_path.exists() and h5_path.exists()):
+        pair = find_collected_data_pair(folder)
+        if pair is None:
             continue
 
         video_name = folder.name + ".avi"
@@ -350,11 +366,12 @@ def summarize_labeled_data() -> None:
         if not folder.is_dir():
             continue
 
-        csv_path = folder / "CollectedData_og.csv"
-        if not csv_path.exists():
+        pair = find_collected_data_pair(folder)
+        if pair is None:
             continue
 
         try:
+            csv_path, _ = pair
             df = pd.read_csv(csv_path, header=[0, 1, 2], index_col=0)
             n = len(df)
             total_frames += n
@@ -455,7 +472,7 @@ def labeled_video() -> None:
     print("Labeled video creation finished.")
 
 def interpolate_mild(pcutoff: float = 0.6, max_gap: int = 7) -> None:
-    existing_videos = [v for v in VIDEOS if v.exists()]
+    existing_videos = existing_video_paths()
     if not existing_videos:
         raise FileNotFoundError("No videos found for interpolation.")
 
@@ -553,9 +570,7 @@ def interpolate_mild(pcutoff: float = 0.6, max_gap: int = 7) -> None:
     print("Mild interpolation finished.")
 
 def inference_metrics() -> None:
-    existing_videos = [v for v in VIDEOS if v.exists()]
-    if not existing_videos:
-        raise FileNotFoundError("No videos found for metrics.")
+    existing_videos = existing_video_paths()
 
     print("=== Inference metrics ===")
     print(f"Using scorer: {SCORER}")
