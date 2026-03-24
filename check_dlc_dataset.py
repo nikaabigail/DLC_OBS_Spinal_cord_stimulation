@@ -21,6 +21,21 @@ def count_labeled_frames_in_csv(csv_path: Path) -> int:
     return len(df)
 
 
+def find_collected_data_pair(folder: Path, scorer: str | None) -> tuple[Path, Path] | None:
+    if scorer:
+        preferred_csv = folder / f"CollectedData_{scorer}.csv"
+        preferred_h5 = folder / f"CollectedData_{scorer}.h5"
+        if preferred_csv.exists() and preferred_h5.exists():
+            return preferred_csv, preferred_h5
+
+    for csv_path in sorted(folder.glob("CollectedData_*.csv")):
+        suffix = csv_path.stem.removeprefix("CollectedData_")
+        h5_path = folder / f"CollectedData_{suffix}.h5"
+        if h5_path.exists():
+            return csv_path, h5_path
+    return None
+
+
 def main():
     print("=" * 80)
     print("DLC DATASET CHECK")
@@ -61,16 +76,13 @@ def main():
         if not folder.is_dir():
             continue
 
-        csv_name = f"CollectedData_{scorer}.csv" if scorer else "CollectedData_og.csv"
-        h5_name = f"CollectedData_{scorer}.h5" if scorer else "CollectedData_og.h5"
-
-        csv_path = folder / csv_name
-        h5_path = folder / h5_name
+        pair = find_collected_data_pair(folder, scorer)
 
         png_count = len(list(folder.glob("*.png")))
 
-        if csv_path.exists():
+        if pair is not None:
             try:
+                csv_path, h5_path = pair
                 n_frames = count_labeled_frames_in_csv(csv_path)
                 total_frames += n_frames
                 folders_with_csv += 1
@@ -88,10 +100,11 @@ def main():
                 )
         else:
             folders_without_csv += 1
+            expected = f"CollectedData_{scorer}.csv/.h5" if scorer else "CollectedData_<scorer>.csv/.h5"
             print(
                 f"[NO CSV] {folder.name}\n"
                 f"         png files: {png_count}\n"
-                f"         expected:  {csv_name}\n"
+                f"         expected pair: {expected}\n"
             )
 
     print("=" * 80)
