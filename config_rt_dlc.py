@@ -15,11 +15,14 @@ SKIP_NEAR_DUPLICATE_FRAMES = True
 DUPLICATE_FRAME_THRESHOLD = 0.15  # средняя разница по grayscale для infer-frame
 
 SHOW_FULL_FRAME = True
+DISPLAY_DELAY_MS = 120          # задержка вывода для более точного совпадения frame->keypoints
 
 # Размер кадра, который подаем в DLC
 # Для боковой дорожки обычно разумно сначала резать ROI, потом уменьшать.
 INFER_W = 960
 INFER_H = 220
+INFER_QUEUE_MAXSIZE = 4         # очередь кадров в async инференсе (держим маленькой против лага)
+MAX_RESULT_HISTORY = 300        # сколько результатов хранить для точного frame matching
 
 # ROI на исходном OBS-кадре (если нужно вырезать дорожку с мышью)
 # Формат: x1, y1, x2, y2
