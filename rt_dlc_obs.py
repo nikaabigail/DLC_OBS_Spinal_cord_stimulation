@@ -207,6 +207,7 @@ class DLCRealtimePredictor:
         self.runner = None
         self.model_cfg: dict | None = None
         self.all_bodyparts: list[str] = []
+        self.bodypart_to_idx: dict[str, int] = {}
         self._init_predictor()
 
     def _init_predictor(self) -> None:
@@ -217,6 +218,7 @@ class DLCRealtimePredictor:
                 self.model_cfg = yaml.safe_load(f)
 
             self.all_bodyparts = list(self.model_cfg["metadata"]["bodyparts"])
+            self.bodypart_to_idx = {name: i for i, name in enumerate(self.all_bodyparts)}
             print("[INFO] Bodyparts order:", self.all_bodyparts)
 
             self.runner = get_pose_inference_runner(
@@ -258,15 +260,15 @@ class DLCRealtimePredictor:
                 f"Неожиданный формат pred output: type={type(raw0)}, repr={repr(raw0)[:500]}"
             )
 
-        poses = raw0["bodypart"]["poses"]
+        poses = self._normalize_poses(raw0["bodypart"]["poses"])
         points: dict[str, dict[str, float | None]] = {}
 
         for point_name in config.USE_POINTS:
-            if point_name not in self.all_bodyparts:
+            idx = self.bodypart_to_idx.get(point_name)
+            if idx is None:
                 points[point_name] = {"x": None, "y": None, "likelihood": None}
                 continue
 
-            idx = self.all_bodyparts.index(point_name)
             if idx >= len(poses):
                 points[point_name] = {"x": None, "y": None, "likelihood": None}
                 continue
@@ -278,6 +280,27 @@ class DLCRealtimePredictor:
             }
 
         return points
+
+    @staticmethod
+    def _normalize_poses(poses_raw: object) -> np.ndarray:
+        poses = np.asarray(poses_raw)
+
+        # Частый случай DLC: batch из 1 элемента -> (1, N, 3)
+        if poses.ndim == 3 and poses.shape[0] == 1:
+            poses = poses[0]
+        # Реже: (N, 1, 3)
+        elif poses.ndim == 3 and poses.shape[1] == 1:
+            poses = poses[:, 0, :]
+        # Совсем вырожденный случай: (3,) для одной точки
+        elif poses.ndim == 1 and poses.shape[0] >= 3:
+            poses = poses.reshape(1, -1)
+
+        if poses.ndim != 2 or poses.shape[1] < 3:
+            raise RuntimeError(
+                f"Unexpected poses shape: {poses.shape}. Expected [N,3] or [1,N,3]."
+            )
+
+        return poses
 
 
 # =========================
