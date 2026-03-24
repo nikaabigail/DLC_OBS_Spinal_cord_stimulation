@@ -21,6 +21,7 @@ SUPPRESS_LOW_MOTION = True
 LOW_MOTION_THRESHOLD = 0.20
 
 SHOW_FULL_FRAME = True
+DISPLAY_DELAY_MS = 120          # задержка вывода для более точного совпадения frame->keypoints
 
 # Размер кадра, который подаем в DLC
 # Для боковой дорожки обычно разумно сначала резать ROI, потом уменьшать.
@@ -33,6 +34,11 @@ TARGET_INFER_FPS = 35.0         # дополнительный лимит час
 # Формат: x1, y1, x2, y2
 USE_ROI = True
 ROI = (0, 430, 1920, 649)
+FORCE_FIXED_ROI = True          # фиксированный ROI приоритетнее auto detect
+AUTO_DETECT_CONTENT_ROI = False # авто-вырезка непустой области (убирает черные поля)
+CONTENT_BLACK_THRESH = 12       # пиксели темнее порога считаем "черным полем"
+CONTENT_MIN_ROW_FILL = 0.08     # минимум заполнения строки не-черными пикселями
+CONTENT_MIN_COL_FILL = 0.03     # минимум заполнения столбца не-черными пикселями
 
 # =========================
 # DLC
