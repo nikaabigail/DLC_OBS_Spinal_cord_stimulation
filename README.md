@@ -64,7 +64,7 @@ python rt_dlc_obs.py
 ```
 
 Для потока 100 FPS в realtime:
-- включен асинхронный конвейер (capture/display и inference развязаны),
+- включен асинхронный конвейер с разделением на capture thread + inference thread + render loop,
 - используется маленькая очередь инференса (`INFER_QUEUE_MAXSIZE`) с anti-backlog стратегией (берется самый свежий кадр),
 - можно включать небольшую задержку вывода (`DISPLAY_DELAY_MS`), чтобы keypoints визуально совпадали с кадром.
 
@@ -72,7 +72,9 @@ python rt_dlc_obs.py
 - `INFER_W/INFER_H` (главный рычаг производительности),
 - `DISPLAY_DELAY_MS`,
 - `SKIP_NEAR_DUPLICATE_FRAMES` и `DUPLICATE_FRAME_THRESHOLD`,
-- `INFER_QUEUE_MAXSIZE`.
+- `INFER_QUEUE_MAXSIZE`,
+- `INFER_EVERY_N_FRAMES` и `TARGET_INFER_FPS`,
+- `FORCE_FIXED_ROI` (для узкой фиксированной дорожки без auto ROI).
 
 Логи realtime пишутся в:
 - `C:\dlc\DLC_OBS_Spinal_cord_stimulation\rt_dlc_debug.log`
@@ -81,7 +83,9 @@ python rt_dlc_obs.py
 - фактический FPS камеры (`cam_fps`) и DLC (`dlc_fps`),
 - размер очереди инференса (`q`),
 - доля кадров с exact/fallback/empty соответствием,
-- процент «видимых» точек (`visible`).
+- `raw_visible` vs `filtered_visible`,
+- skip-счетчики по причинам (`skip_dup`, `skip_motion`, `skip_n`, `skip_fps`),
+- тайминги стадий (`t_capture`, `t_pre`, `t_infer`, `t_post`, `t_draw`, `t_disp`).
 
 ## Что проверено и отполировано
 
