@@ -74,6 +74,15 @@ python rt_dlc_obs.py
 - `SKIP_NEAR_DUPLICATE_FRAMES` и `DUPLICATE_FRAME_THRESHOLD`,
 - `INFER_QUEUE_MAXSIZE`.
 
+Логи realtime пишутся в:
+- `C:\dlc\DLC_OBS_Spinal_cord_stimulation\rt_dlc_debug.log`
+
+Каждые `LOG_EVERY_N_FRAMES` выводятся диагностические метрики:
+- фактический FPS камеры (`cam_fps`) и DLC (`dlc_fps`),
+- размер очереди инференса (`q`),
+- доля кадров с exact/fallback/empty соответствием,
+- процент «видимых» точек (`visible`).
+
 ## Что проверено и отполировано
 
 ### 1) Убраны неиспользуемые сущности

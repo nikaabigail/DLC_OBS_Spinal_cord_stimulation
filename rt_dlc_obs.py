@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import logging
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -31,6 +32,19 @@ def crop_roi(frame: np.ndarray) -> np.ndarray:
             "Expected 0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height."
         )
     return frame[y1:y2, x1:x2]
+
+
+def detect_content_roi(frame: np.ndarray, black_thresh: int = 12) -> tuple[int, int, int, int] | None:
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    mask = gray > black_thresh
+    ys, xs = np.where(mask)
+    if len(xs) == 0 or len(ys) == 0:
+        return None
+    x1, x2 = int(xs.min()), int(xs.max()) + 1
+    y1, y2 = int(ys.min()), int(ys.max()) + 1
+    if x2 - x1 < 32 or y2 - y1 < 32:
+        return None
+    return x1, y1, x2, y2
 
 
 def resize_for_infer(frame: np.ndarray) -> np.ndarray:
@@ -126,6 +140,28 @@ def validate_runtime_config() -> None:
         raise ValueError("DISPLAY_DELAY_MS must be >= 0.")
     if getattr(config, "MAX_RESULT_HISTORY", 10) <= 0:
         raise ValueError("MAX_RESULT_HISTORY must be positive.")
+
+
+def setup_logger() -> logging.Logger:
+    logger = logging.getLogger("rt_dlc")
+    if logger.handlers:
+        return logger
+
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+
+    sh = logging.StreamHandler()
+    sh.setFormatter(formatter)
+    logger.addHandler(sh)
+
+    try:
+        fh = logging.FileHandler(config.LOG_PATH, encoding="utf-8")
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+    except Exception as exc:
+        logger.warning("Cannot open log file %s: %s", getattr(config, "LOG_PATH", ""), exc)
+
+    return logger
 
 
 # =========================
@@ -433,6 +469,7 @@ def draw_overlay(
 # =========================
 def main() -> None:
     validate_runtime_config()
+    logger = setup_logger()
 
     cap = cv2.VideoCapture(config.CAM_INDEX, cv2.CAP_DSHOW)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.FRAME_W)
@@ -441,6 +478,27 @@ def main() -> None:
 
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open camera index {config.CAM_INDEX}")
+
+    actual_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    actual_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    actual_fps = cap.get(cv2.CAP_PROP_FPS)
+    logger.info(
+        "Camera opened: index=%s requested=(%sx%s @ %.1f) actual=(%.0fx%.0f @ %.1f)",
+        config.CAM_INDEX,
+        config.FRAME_W,
+        config.FRAME_H,
+        config.TARGET_VIDEO_FPS,
+        actual_w,
+        actual_h,
+        actual_fps,
+    )
+    if actual_fps > 0 and actual_fps < config.TARGET_VIDEO_FPS * 0.8:
+        logger.warning(
+            "Actual camera FPS is much lower than requested (%.1f vs %.1f). "
+            "Source/backend likely capped.",
+            actual_fps,
+            config.TARGET_VIDEO_FPS,
+        )
 
     predictor = DLCRealtimePredictor()
     point_filter = OnlinePointFilter()
@@ -467,6 +525,15 @@ def main() -> None:
         getattr(config, "DISPLAY_DELAY_MS", 0) / 1000.0 * max(1.0, config.TARGET_VIDEO_FPS)
     ))
     frame_buffer: deque[tuple[int, np.ndarray, tuple[int, int], tuple[int, int], tuple[int, int], float, bool]] = deque()
+    stats = {
+        "infer_jobs": 0,
+        "infer_frames": 0,
+        "exact_match": 0,
+        "fallback_match": 0,
+        "empty_match": 0,
+        "visible_points": 0,
+        "total_points": 0,
+    }
 
     def infer_worker() -> None:
         nonlocal fps_dlc, latest_result
@@ -486,6 +553,7 @@ def main() -> None:
                     break
 
             raw_points = predictor.predict_frame(job.infer_frame)
+            stats["infer_frames"] += 1
 
             processed_points: dict[str, dict[str, float | None]] = {}
             for point_name, p in raw_points.items():
@@ -497,6 +565,9 @@ def main() -> None:
                     frame_idx=job.frame_idx,
                 )
                 processed_points[point_name] = {"x": x, "y": y, "likelihood": l}
+                stats["total_points"] += 1
+                if x is not None and y is not None and l is not None and l >= config.CONF_THRESH_DRAW:
+                    stats["visible_points"] += 1
 
             t_done = time.time()
             if prev_dlc_ts_local is not None:
@@ -545,6 +616,17 @@ def main() -> None:
                 roi_offset = (x1, y1)
             else:
                 roi_offset = (0, 0)
+
+            if frame_idx == 1 and getattr(config, "AUTO_DETECT_CONTENT_ROI", False):
+                auto_roi = detect_content_roi(frame, black_thresh=getattr(config, "CONTENT_BLACK_THRESH", 12))
+                if auto_roi is not None:
+                    config.ROI = auto_roi
+                    config.USE_ROI = True
+                    x1, y1, x2, y2 = config.ROI
+                    roi_offset = (x1, y1)
+                    logger.info("AUTO_DETECT_CONTENT_ROI enabled. Using ROI=%s", config.ROI)
+                else:
+                    logger.warning("AUTO_DETECT_CONTENT_ROI could not find content. Keeping configured ROI.")
 
             roi = crop_roi(frame)
             infer_frame = resize_for_infer(roi)
@@ -598,12 +680,14 @@ def main() -> None:
                 )
                 try:
                     infer_queue.put_nowait(job)
+                    stats["infer_jobs"] += 1
                 except Full:
                     try:
                         _ = infer_queue.get_nowait()
                     except Empty:
                         pass
                     infer_queue.put_nowait(job)
+                    stats["infer_jobs"] += 1
 
             frame_buffer.append(
                 (
@@ -629,6 +713,7 @@ def main() -> None:
             if result_exact is not None:
                 processed_points = result_exact.points
                 map_meta = result_exact
+                stats["exact_match"] += 1
             elif result_fallback is not None and disp_active:
                 processed_points = result_fallback.points
                 map_meta = InferResult(
@@ -639,6 +724,7 @@ def main() -> None:
                     roi_offset=disp_roi_offset,
                     ts=time.time(),
                 )
+                stats["fallback_match"] += 1
             else:
                 processed_points = {
                     point_name: {"x": None, "y": None, "likelihood": None}
@@ -652,6 +738,7 @@ def main() -> None:
                     roi_offset=disp_roi_offset,
                     ts=time.time(),
                 )
+                stats["empty_match"] += 1
 
             hind_angle = None
             if disp_active and config.COMPUTE_HIND_ANGLE:
@@ -708,6 +795,29 @@ def main() -> None:
             key = cv2.waitKey(1) & 0xFF
             if key in (27, ord("q")):
                 break
+
+            if frame_idx % max(1, getattr(config, "LOG_EVERY_N_FRAMES", 30)) == 0:
+                visibility = (
+                    stats["visible_points"] / stats["total_points"] * 100.0
+                    if stats["total_points"] > 0
+                    else 0.0
+                )
+                logger.info(
+                    "frame=%d cam_fps=%.1f dlc_fps=%.1f skip_fps=%.1f q=%d "
+                    "jobs=%d infer=%d exact=%d fallback=%d empty=%d visible=%.1f%% motion=%.3f",
+                    frame_idx,
+                    fps_cam,
+                    fps_dlc,
+                    fps_skip,
+                    infer_queue.qsize(),
+                    stats["infer_jobs"],
+                    stats["infer_frames"],
+                    stats["exact_match"],
+                    stats["fallback_match"],
+                    stats["empty_match"],
+                    visibility,
+                    motion_score,
+                )
     finally:
         stop_event.set()
         worker.join(timeout=1.0)
