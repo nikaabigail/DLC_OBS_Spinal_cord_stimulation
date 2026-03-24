@@ -74,21 +74,17 @@ python rt_dlc_obs.py
 
 Тюнинг для скорости/точности смотрите в `config_rt_dlc.py`:
 - `INFER_W/INFER_H` (главный рычаг производительности),
-- `DISPLAY_DELAY_MS`,
 - `SKIP_NEAR_DUPLICATE_FRAMES` и `DUPLICATE_FRAME_THRESHOLD`,
-- `INFER_QUEUE_MAXSIZE`,
 - `INFER_EVERY_N_FRAMES` и `TARGET_INFER_FPS`,
-- `FORCE_FIXED_ROI` (для узкой фиксированной дорожки без auto ROI).
+- `USE_ROI` и `ROI` (фиксированный рабочий crop).
 
 Логи realtime пишутся в:
 - `C:\dlc\DLC_OBS_Spinal_cord_stimulation\rt_dlc_debug.log`
 
 Каждые `LOG_EVERY_N_FRAMES` выводятся диагностические метрики:
 - фактический FPS камеры (`cam_fps`) и DLC (`dlc_fps`),
-- размер очереди инференса (`q`),
-- доля кадров с exact/fallback/empty соответствием,
 - `raw_visible` vs `filtered_visible`,
-- skip-счетчики по причинам (`skip_dup`, `skip_motion`, `skip_n`, `skip_fps`),
+- skip-счетчики по причинам (`skip_duplicate`, `skip_motion`, `skip_n`, `skip_fps`),
 - тайминги стадий (`t_capture`, `t_pre`, `t_infer`, `t_post`, `t_draw`, `t_disp`).
 
 ## Что проверено и отполировано

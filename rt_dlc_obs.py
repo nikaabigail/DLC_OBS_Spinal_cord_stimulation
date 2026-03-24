@@ -532,31 +532,22 @@ def setup_logger() -> logging.Logger:
     return logger
 
 
+def validate_runtime_config() -> None:
+    if config.INFER_W <= 0 or config.INFER_H <= 0:
+        raise ValueError("INFER_W and INFER_H must be positive.")
+    if config.INFER_EVERY_N_FRAMES <= 0:
+        raise ValueError("INFER_EVERY_N_FRAMES must be positive.")
+    if config.TARGET_INFER_FPS <= 0:
+        raise ValueError("TARGET_INFER_FPS must be positive.")
+    if config.USE_VIDEO_FILE and not Path(config.VIDEO_FILE_PATH).exists():
+        raise FileNotFoundError(f"VIDEO_FILE_PATH does not exist: {config.VIDEO_FILE_PATH}")
+
+
 def main() -> None:
+    validate_runtime_config()
     logger = setup_logger()
     source = build_frame_source()
     source.open()
-
-    actual_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-    actual_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-    actual_fps = cap.get(cv2.CAP_PROP_FPS)
-    logger.info(
-        "Camera opened: index=%s requested=(%sx%s @ %.1f) actual=(%.0fx%.0f @ %.1f)",
-        config.CAM_INDEX,
-        config.FRAME_W,
-        config.FRAME_H,
-        config.TARGET_VIDEO_FPS,
-        actual_w,
-        actual_h,
-        actual_fps,
-    )
-    if actual_fps > 0 and actual_fps < config.TARGET_VIDEO_FPS * 0.8:
-        logger.warning(
-            "Actual camera FPS is much lower than requested (%.1f vs %.1f). "
-            "Source/backend likely capped.",
-            actual_fps,
-            config.TARGET_VIDEO_FPS,
-        )
 
     predictor = DLCRealtimePredictor()
     point_filter = OnlinePointFilter()
@@ -571,6 +562,8 @@ def main() -> None:
     prev_motion_gray: Optional[np.ndarray] = None
     prev_cam_ts: Optional[float] = None
     prev_infer_end_ts: Optional[float] = None
+    prev_infer_ts_for_fps: Optional[float] = None
+    fps_dlc = 0.0
     last_processed_points = {p: {"x": None, "y": None, "likelihood": None} for p in config.USE_POINTS}
 
     csv_header_written = False
@@ -643,6 +636,11 @@ def main() -> None:
             t_inf1 = time.perf_counter()
             infer_end_ts = time.time()
             prev_infer_end_ts = infer_end_ts
+            if prev_infer_ts_for_fps is not None:
+                dt_inf = infer_end_ts - prev_infer_ts_for_fps
+                if dt_inf > 0:
+                    fps_dlc = 1.0 / dt_inf
+            prev_infer_ts_for_fps = infer_end_ts
             stats["infer_frames"] += 1
             stats["t_infer_ms"] += (t_inf1 - t_inf0) * 1000.0
 
@@ -703,7 +701,6 @@ def main() -> None:
             display = infer_frame.copy()
 
         skip_rate = (skip_reasons["skip_total"] / max(1.0, stats["frames"])) * 100.0
-        fps_dlc = stats["infer_frames"] / max(1e-6, (time.time() - (prev_cam_ts or time.time()) + 1e-3))
 
         display = draw_overlay(display, display_points, stats.get("fps_cam", 0.0), fps_dlc, skip_rate, hind_angle, True, motion_score)
         t_draw1 = time.perf_counter()
@@ -731,7 +728,7 @@ def main() -> None:
             )
             logger.info(
                 "frame_id=%d raw_visible=%.1f%% filtered_visible=%.1f%% skip_rate=%.1f%% "
-                "skip_n=%d skip_motion=%d skip_duplicate=%d skip_fps=%d skip_busy=%d "
+                "skip_n=%d skip_motion=%d skip_duplicate=%d skip_fps=%d "
                 "latency=%.1fms t_capture=%.2f t_pre=%.2f t_infer=%.2f t_post=%.2f t_draw=%.2f t_display=%.2f "
                 "hist=%s roi=%s infer=%sx%s infer_start=%.3f infer_end=%.3f display_ts=%.3f bp_lik={%s}",
                 frame_id,
@@ -742,7 +739,6 @@ def main() -> None:
                 int(skip_reasons.get("skip_motion", 0)),
                 int(skip_reasons.get("skip_duplicate", 0)),
                 int(skip_reasons.get("skip_fps", 0)),
-                int(skip_reasons.get("skip_busy", 0)),
                 lat_ms,
                 stats["t_capture_ms"] / max(1.0, stats["frames"]),
                 stats["t_pre_ms"] / max(1.0, stats["frames"]),
@@ -767,7 +763,7 @@ def main() -> None:
                     if not csv_header_written:
                         w.writerow([
                             "frame_id", "raw_visible", "filtered_visible", "skip_rate",
-                            "skip_n", "skip_motion", "skip_duplicate", "skip_fps", "skip_busy",
+                            "skip_n", "skip_motion", "skip_duplicate", "skip_fps",
                             "latency_ms", "t_capture_ms", "t_pre_ms", "t_infer_ms", "t_post_ms", "t_draw_ms", "t_display_ms",
                             "hist_lt02", "hist_02_04", "hist_04_06", "hist_06_08", "hist_ge08",
                             "roi", "infer_w", "infer_h",
@@ -775,7 +771,7 @@ def main() -> None:
                         csv_header_written = True
                     w.writerow([
                         frame_id, raw_vis, filt_vis, skip_rate,
-                        skip_reasons.get("skip_n", 0), skip_reasons.get("skip_motion", 0), skip_reasons.get("skip_duplicate", 0), skip_reasons.get("skip_fps", 0), skip_reasons.get("skip_busy", 0),
+                        skip_reasons.get("skip_n", 0), skip_reasons.get("skip_motion", 0), skip_reasons.get("skip_duplicate", 0), skip_reasons.get("skip_fps", 0),
                         lat_ms,
                         stats["t_capture_ms"] / max(1.0, stats["frames"]),
                         stats["t_pre_ms"] / max(1.0, stats["frames"]),
