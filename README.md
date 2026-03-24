@@ -71,12 +71,14 @@ python rt_dlc_obs.py
 - включен strict latest-frame режим без накопления буферов,
 - для video source есть pacing (`VIDEO_TARGET_FPS`) и optional skip when behind (`VIDEO_SKIP_IF_BEHIND`),
 - инференс контролируется admission-гейтами (`INFER_EVERY_N_FRAMES`, `TARGET_INFER_FPS`).
+- для синхронной визуализации используется display-buffer (`DISPLAY_BUFFER_MS`) с match по `frame_id`.
 
 Тюнинг для скорости/точности смотрите в `config_rt_dlc.py`:
 - `INFER_W/INFER_H` (главный рычаг производительности),
 - `SKIP_NEAR_DUPLICATE_FRAMES` и `DUPLICATE_FRAME_THRESHOLD`,
 - `INFER_EVERY_N_FRAMES` и `TARGET_INFER_FPS`,
-- `USE_ROI` и `ROI` (фиксированный рабочий crop).
+- `USE_ROI` и `ROI` (фиксированный рабочий crop),
+- `DISPLAY_BUFFER_MS`, `MAX_FRAME_BUFFER`, `MAX_PRED_BUFFER`.
 
 Логи realtime пишутся в:
 - `C:\dlc\DLC_OBS_Spinal_cord_stimulation\rt_dlc_debug.log`

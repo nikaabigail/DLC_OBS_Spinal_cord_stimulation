@@ -21,7 +21,9 @@ SUPPRESS_LOW_MOTION = True
 LOW_MOTION_THRESHOLD = 0.20
 
 SHOW_FULL_FRAME = True
-DISPLAY_DELAY_MS = 120          # задержка вывода для более точного совпадения frame->keypoints
+DISPLAY_BUFFER_MS = 100
+MAX_FRAME_BUFFER = 256
+MAX_PRED_BUFFER = 256
 
 # Размер кадра, который подаем в DLC
 # Для боковой дорожки обычно разумно сначала резать ROI, потом уменьшать.

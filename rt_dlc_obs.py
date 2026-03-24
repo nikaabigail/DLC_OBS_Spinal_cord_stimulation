@@ -31,6 +31,17 @@ class FramePacket:
     capture_ts: float
 
 
+@dataclass
+class PredictionPacket:
+    frame_id: int
+    infer_start_ts: float
+    infer_end_ts: float
+    points: dict[str, dict[str, float | None]]
+    roi_shape: tuple[int, int]
+    infer_shape: tuple[int, int]
+    roi_offset: tuple[int, int]
+
+
 class FrameSource(ABC):
     @abstractmethod
     def open(self) -> None:
@@ -539,6 +550,10 @@ def validate_runtime_config() -> None:
         raise ValueError("INFER_EVERY_N_FRAMES must be positive.")
     if config.TARGET_INFER_FPS <= 0:
         raise ValueError("TARGET_INFER_FPS must be positive.")
+    if config.DISPLAY_BUFFER_MS < 0:
+        raise ValueError("DISPLAY_BUFFER_MS must be >= 0.")
+    if config.MAX_FRAME_BUFFER <= 0 or config.MAX_PRED_BUFFER <= 0:
+        raise ValueError("MAX_FRAME_BUFFER and MAX_PRED_BUFFER must be positive.")
     if config.USE_VIDEO_FILE and not Path(config.VIDEO_FILE_PATH).exists():
         raise FileNotFoundError(f"VIDEO_FILE_PATH does not exist: {config.VIDEO_FILE_PATH}")
 
@@ -564,7 +579,8 @@ def main() -> None:
     prev_infer_end_ts: Optional[float] = None
     prev_infer_ts_for_fps: Optional[float] = None
     fps_dlc = 0.0
-    last_processed_points = {p: {"x": None, "y": None, "likelihood": None} for p in config.USE_POINTS}
+    frame_buffer: deque[FramePacket] = deque(maxlen=config.MAX_FRAME_BUFFER)
+    pred_buffer: deque[PredictionPacket] = deque(maxlen=config.MAX_PRED_BUFFER)
 
     csv_header_written = False
 
@@ -580,6 +596,7 @@ def main() -> None:
         frame = packet.frame
         frame_id = packet.frame_id
         capture_ts = packet.capture_ts
+        frame_buffer.append(packet)
         stats["frames"] += 1
         stats["t_capture_ms"] += (t_cap1 - t_cap0) * 1000.0
 
@@ -672,11 +689,67 @@ def main() -> None:
 
             t_post1 = time.perf_counter()
             stats["t_post_ms"] += (t_post1 - t_post0) * 1000.0
-            last_processed_points = filtered_points
+            pred_buffer.append(
+                PredictionPacket(
+                    frame_id=frame_id,
+                    infer_start_ts=infer_start_ts,
+                    infer_end_ts=infer_end_ts,
+                    points=filtered_points,
+                    roi_shape=(roi.shape[0], roi.shape[1]),
+                    infer_shape=(infer_frame.shape[0], infer_frame.shape[1]),
+                    roi_offset=roi_offset,
+                )
+            )
         else:
             skip_reasons["skip_total"] += 1
 
-        processed_points = last_processed_points
+        display_ts = time.time()
+        target_display_ts = display_ts - (config.DISPLAY_BUFFER_MS / 1000.0)
+
+        display_packet: Optional[FramePacket] = None
+        while len(frame_buffer) >= 2 and frame_buffer[1].capture_ts <= target_display_ts:
+            frame_buffer.popleft()
+
+        if frame_buffer:
+            if frame_buffer[0].capture_ts <= target_display_ts:
+                display_packet = frame_buffer[0]
+            else:
+                display_packet = frame_buffer[0]  # fallback: oldest available
+
+        if display_packet is None:
+            continue
+
+        matched_pred: Optional[PredictionPacket] = None
+        exact_match = 0
+        for pred in reversed(pred_buffer):
+            if pred.frame_id == display_packet.frame_id:
+                matched_pred = pred
+                exact_match = 1
+                break
+        if matched_pred is None:
+            for pred in reversed(pred_buffer):
+                if pred.frame_id <= display_packet.frame_id:
+                    matched_pred = pred
+                    break
+
+        if matched_pred is not None:
+            processed_points = matched_pred.points
+            pred_frame_id = matched_pred.frame_id
+            pred_age_ms = (display_ts - matched_pred.infer_end_ts) * 1000.0
+            map_roi_shape = matched_pred.roi_shape
+            map_infer_shape = matched_pred.infer_shape
+            map_roi_offset = matched_pred.roi_offset
+        else:
+            processed_points = {p: {"x": None, "y": None, "likelihood": None} for p in config.USE_POINTS}
+            pred_frame_id = -1
+            pred_age_ms = -1.0
+            map_roi_shape = (roi.shape[0], roi.shape[1])
+            map_infer_shape = (infer_frame.shape[0], infer_frame.shape[1])
+            map_roi_offset = roi_offset
+
+        display_frame_id = display_packet.frame_id
+        frame_delta = display_frame_id - pred_frame_id if pred_frame_id >= 0 else -1
+        display_buffer_ms_actual = (display_ts - display_packet.capture_ts) * 1000.0
 
         # compute feature
         hind_angle = None
@@ -691,14 +764,14 @@ def main() -> None:
         if config.SHOW_FULL_FRAME:
             display_points = map_points_from_infer_to_display(
                 processed_points,
-                roi_shape=(roi.shape[0], roi.shape[1]),
-                infer_shape=(infer_frame.shape[0], infer_frame.shape[1]),
-                roi_offset=roi_offset,
+                roi_shape=map_roi_shape,
+                infer_shape=map_infer_shape,
+                roi_offset=map_roi_offset,
             )
-            display = frame.copy()
+            display = display_packet.frame.copy()
         else:
             display_points = processed_points
-            display = infer_frame.copy()
+            display = resize_for_infer(crop_roi(display_packet.frame))
 
         skip_rate = (skip_reasons["skip_total"] / max(1.0, stats["frames"])) * 100.0
 
@@ -715,7 +788,7 @@ def main() -> None:
         t_disp1 = time.perf_counter()
         stats["t_display_ms"] += (t_disp1 - t_disp0) * 1000.0
 
-        stats["latency_ms"] += (display_ts - capture_ts) * 1000.0
+        stats["latency_ms"] += (display_ts - display_packet.capture_ts) * 1000.0
         stats["latency_count"] += 1
 
         if frame_id % max(1, config.LOG_EVERY_N_FRAMES) == 0:
@@ -724,12 +797,16 @@ def main() -> None:
             lat_ms = stats["latency_ms"] / max(1.0, stats["latency_count"])
 
             bp_txt = ",".join(
-                f"{bp}:{bodypart_lik_sum[bp]/max(1, bodypart_lik_cnt[bp]):.2f}" for bp in config.USE_POINTS if bodypart_lik_cnt[bp] > 0
+                f"{bp}:{bodypart_lik_sum[bp]/max(1, bodypart_lik_cnt[bp]):.2f}"
+                for bp in config.USE_POINTS
+                if bodypart_lik_cnt[bp] > 0
             )
             logger.info(
                 "frame_id=%d raw_visible=%.1f%% filtered_visible=%.1f%% skip_rate=%.1f%% "
                 "skip_n=%d skip_motion=%d skip_duplicate=%d skip_fps=%d "
                 "latency=%.1fms t_capture=%.2f t_pre=%.2f t_infer=%.2f t_post=%.2f t_draw=%.2f t_display=%.2f "
+                "display_frame_id=%d pred_frame_id=%d frame_delta=%d exact_match=%d "
+                "display_buffer_ms_actual=%.1f pred_age_ms=%.1f "
                 "hist=%s roi=%s infer=%sx%s infer_start=%.3f infer_end=%.3f display_ts=%.3f bp_lik={%s}",
                 frame_id,
                 raw_vis,
@@ -746,6 +823,12 @@ def main() -> None:
                 stats["t_post_ms"] / max(1.0, stats["infer_frames"]),
                 stats["t_draw_ms"] / max(1.0, stats["frames"]),
                 stats["t_display_ms"] / max(1.0, stats["frames"]),
+                display_frame_id,
+                pred_frame_id,
+                frame_delta,
+                exact_match,
+                display_buffer_ms_actual,
+                pred_age_ms,
                 likelihood_hist,
                 config.ROI if config.USE_ROI else "full",
                 config.INFER_W,
@@ -765,6 +848,8 @@ def main() -> None:
                             "frame_id", "raw_visible", "filtered_visible", "skip_rate",
                             "skip_n", "skip_motion", "skip_duplicate", "skip_fps",
                             "latency_ms", "t_capture_ms", "t_pre_ms", "t_infer_ms", "t_post_ms", "t_draw_ms", "t_display_ms",
+                            "display_frame_id", "pred_frame_id", "frame_delta", "exact_match",
+                            "display_buffer_ms_actual", "pred_age_ms",
                             "hist_lt02", "hist_02_04", "hist_04_06", "hist_06_08", "hist_ge08",
                             "roi", "infer_w", "infer_h",
                         ])
@@ -779,6 +864,7 @@ def main() -> None:
                         stats["t_post_ms"] / max(1.0, stats["infer_frames"]),
                         stats["t_draw_ms"] / max(1.0, stats["frames"]),
                         stats["t_display_ms"] / max(1.0, stats["frames"]),
+                        display_frame_id, pred_frame_id, frame_delta, exact_match, display_buffer_ms_actual, pred_age_ms,
                         *likelihood_hist,
                         config.ROI if config.USE_ROI else "full",
                         config.INFER_W,
