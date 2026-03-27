@@ -19,6 +19,8 @@ import yaml
 
 import config_rt_dlc as config
 
+_roi_warning_emitted = False
+
 
 # =========================
 # Frame source abstraction
@@ -170,7 +172,25 @@ def resolve_roi(frame: np.ndarray) -> tuple[np.ndarray, tuple[int, int]]:
     2) full frame fallback (if USE_ROI=False)
     """
     if getattr(config, "USE_ROI", False):
-        return crop_roi(frame), (config.ROI[0], config.ROI[1])
+        x1, y1, x2, y2 = config.ROI
+        h, w = frame.shape[:2]
+        if 0 <= x1 < x2 <= w and 0 <= y1 < y2 <= h:
+            return frame[y1:y2, x1:x2], (x1, y1)
+
+        roi_w = max(0, x2 - x1)
+        roi_h = max(0, y2 - y1)
+        # Частый кейс: источник уже отдает кадр, соответствующий ROI.
+        if w == roi_w and h == roi_h:
+            return frame, (0, 0)
+
+        global _roi_warning_emitted
+        if not _roi_warning_emitted:
+            print(
+                "[WARN] ROI does not fit current frame size; fallback to full frame. "
+                f"ROI={config.ROI}, frame_size={(w, h)}"
+            )
+            _roi_warning_emitted = True
+        return frame, (0, 0)
 
     return frame, (0, 0)
 
@@ -686,6 +706,9 @@ def main() -> None:
                         run_dlc = False
                         skip_reasons["skip_duplicate"] += 1
                 prev_frame_gray = gray_small
+            if run_dlc and infer_queue.qsize() > 0:
+                run_dlc = False
+                skip_reasons["skip_busy"] += 1
             if run_dlc and last_infer_submit_perf is not None:
                 min_dt = 1.0 / max(1.0, config.TARGET_INFER_FPS)
                 if (time.perf_counter() - last_infer_submit_perf) < min_dt:
@@ -811,7 +834,8 @@ def main() -> None:
                 display = display_packet.frame.copy()
             else:
                 display_points = processed_points
-                display = resize_for_infer(crop_roi(display_packet.frame))
+                display_roi, _ = resolve_roi(display_packet.frame)
+                display = resize_for_infer(display_roi)
 
             skip_rate = (skip_reasons["skip_total"] / max(1.0, stats["frames"])) * 100.0
             processing_active = True
@@ -852,7 +876,7 @@ def main() -> None:
                 )
                 logger.info(
                     "frame_id=%d raw_visible=%.1f%% filtered_visible=%.1f%% skip_rate=%.1f%% "
-                    "skip_n=%d skip_motion=%d skip_duplicate=%d skip_fps=%d "
+                    "skip_n=%d skip_motion=%d skip_duplicate=%d skip_busy=%d skip_fps=%d "
                     "latency=%.1fms t_capture=%.2f t_pre=%.2f t_infer=%.2f t_post=%.2f t_draw=%.2f t_display=%.2f "
                     "display_frame_id=%d pred_frame_id=%d frame_delta=%d exact_match=%d "
                     "display_buffer_ms_actual=%.1f pred_age_ms=%.1f "
@@ -864,6 +888,7 @@ def main() -> None:
                     int(skip_reasons.get("skip_n", 0)),
                     int(skip_reasons.get("skip_motion", 0)),
                     int(skip_reasons.get("skip_duplicate", 0)),
+                    int(skip_reasons.get("skip_busy", 0)),
                     int(skip_reasons.get("skip_fps", 0)),
                     lat_ms,
                     stats["t_capture_ms"] / max(1.0, stats["frames"]),
@@ -895,7 +920,7 @@ def main() -> None:
                         if not csv_header_written:
                             w.writerow([
                                 "frame_id", "raw_visible", "filtered_visible", "skip_rate",
-                                "skip_n", "skip_motion", "skip_duplicate", "skip_fps",
+                                "skip_n", "skip_motion", "skip_duplicate", "skip_busy", "skip_fps",
                                 "latency_ms", "t_capture_ms", "t_pre_ms", "t_infer_ms", "t_post_ms", "t_draw_ms", "t_display_ms",
                                 "display_frame_id", "pred_frame_id", "frame_delta", "exact_match",
                                 "display_buffer_ms_actual", "pred_age_ms",
@@ -905,7 +930,7 @@ def main() -> None:
                             csv_header_written = True
                         w.writerow([
                             frame_id, raw_vis, filt_vis, skip_rate,
-                            skip_reasons.get("skip_n", 0), skip_reasons.get("skip_motion", 0), skip_reasons.get("skip_duplicate", 0), skip_reasons.get("skip_fps", 0),
+                            skip_reasons.get("skip_n", 0), skip_reasons.get("skip_motion", 0), skip_reasons.get("skip_duplicate", 0), skip_reasons.get("skip_busy", 0), skip_reasons.get("skip_fps", 0),
                             lat_ms,
                             stats["t_capture_ms"] / max(1.0, stats["frames"]),
                             stats["t_pre_ms"] / max(1.0, stats["frames"]),
