@@ -4,8 +4,8 @@ from pathlib import Path
 # Video / OBS
 # =========================
 CAM_INDEX = 2
-USE_VIDEO_FILE = False
-VIDEO_FILE_PATH = r"C:\dlc\videos\input.mp4"
+USE_VIDEO_FILE = True
+VIDEO_FILE_PATH = r"C:\dlc\videos\6_MER2-230-168U3C(FDE22070174)_20240604_170308.avi"
 VIDEO_TARGET_FPS = 60.0
 VIDEO_SKIP_IF_BEHIND = True
 FRAME_W = 1920
@@ -15,26 +15,26 @@ SHOW_SCALE = 0.8
 AUTO_START_ON_MOTION = True
 FRAME_DIFF_THRESHOLD = 0.5
 
-SKIP_NEAR_DUPLICATE_FRAMES = False
+SKIP_NEAR_DUPLICATE_FRAMES = False 
 DUPLICATE_FRAME_THRESHOLD = 0.15  # средняя разница по grayscale для infer-frame
-SUPPRESS_LOW_MOTION = True
-LOW_MOTION_THRESHOLD = 0.20
+SUPPRESS_LOW_MOTION = False 
+LOW_MOTION_THRESHOLD = 0.20 # средняя разница по grayscale для определения "низкого движения"
 
 SHOW_FULL_FRAME = True
-DISPLAY_BUFFER_MS = 100
-MAX_FRAME_BUFFER = 256
-MAX_PRED_BUFFER = 256
+DISPLAY_BUFFER_MS = 50  # сколько миллисекунд держать кадр в буфере для отображения (для синхронизации с инференсом)
+MAX_FRAME_BUFFER = 8 # макс кол-во кадров в буфере для отображения (на случай, если инференс отстает)
+MAX_PRED_BUFFER = 8 # макс кол-во предсказаний в буфере (на случай, если инференс отстает, чтобы не держать слишком много старых предсказаний)
 
 # Размер кадра, который подаем в DLC
 # Для боковой дорожки обычно разумно сначала резать ROI, потом уменьшать.
-INFER_W = 640
-INFER_H = 160
-INFER_EVERY_N_FRAMES = 2        # жесткий throttling: инференс не на каждый кадр
+INFER_W = 1920
+INFER_H = 220
+INFER_EVERY_N_FRAMES = 3        # жесткий throttling: инференс не на каждый кадр
 TARGET_INFER_FPS = 35.0         # дополнительный лимит частоты запуска инференса
 
 # ROI на исходном OBS-кадре (если нужно вырезать дорожку с мышью)
 # Формат: x1, y1, x2, y2
-USE_ROI = True
+USE_ROI = False
 ROI = (0, 430, 1920, 649)
 FORCE_FIXED_ROI = True          # фиксированный ROI приоритетнее auto detect
 AUTO_DETECT_CONTENT_ROI = False # авто-вырезка непустой области (убирает черные поля)
@@ -64,9 +64,6 @@ USE_POINTS = [
     "hl_hip_r",
     "hl_ankle_r",
     "hl_toes_r",
-    "spine",
-    "tail",
-    "nose",
 ]
 
 # Для отрисовки
@@ -75,9 +72,9 @@ CONF_THRESH_DRAW = 0.3
 # =========================
 # Online filtering
 # =========================
-CONF_THRESH_USE = 0.3
-DESPIKE_THRESHOLD_PX = 140.0    # online threshold
-MAX_HOLD_FRAMES = 6             # сколько кадров держим последнюю хорошую точку
+CONF_THRESH_USE = 0.15
+DESPIKE_THRESHOLD_PX = 220.0    # online threshold
+MAX_HOLD_FRAMES = 12             # сколько кадров держим последнюю хорошую точку
 MEDIAN_WINDOW = 3               # online median window по x/y
 ENABLE_PCUTOFF = True
 ENABLE_DESPIKE = True
