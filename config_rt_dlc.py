@@ -82,10 +82,18 @@ MEDIAN_WINDOW = 3               # online median window по x/y
 ENABLE_PCUTOFF = True
 ENABLE_DESPIKE = True
 ENABLE_HOLD = True
+# После длительной окклюзии разрешаем "перезахват" точки даже при большом скачке
+# относительно последней валидной позиции (иначе despike может блокировать возврат точки).
+DESPIKE_RESET_GAP_FRAMES = 20
 
 # Логи / диагностика
 LOG_PATH = Path(r"C:\dlc\DLC_OBS_Spinal_cord_stimulation\rt_dlc_debug.log")
 LOG_EVERY_N_FRAMES = 30
+# Диагностика триплета (raw/filt/draw/reason) может быть дорогой при логировании каждого кадра.
+# 0 = отключить периодический лог, >0 = писать раз в N кадров.
+TRIPLET_LOG_EVERY_N_FRAMES = 30
+# Дополнительно писать строку сразу при смене состояния (triplet -> no-triplet и обратно).
+TRIPLET_LOG_ON_STATE_CHANGE = False
 BENCHMARK_CSV_PATH = Path(r"C:\dlc\DLC_OBS_Spinal_cord_stimulation\rt_dlc_benchmark.csv")
 ENABLE_BENCHMARK_LOG_ROW = True
 
