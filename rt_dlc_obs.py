@@ -857,6 +857,8 @@ def main() -> None:
                 processed_points = {p: {"x": None, "y": None, "likelihood": None} for p in config.USE_POINTS}
 
             draw_points, has_triplet, reason_dict = evaluate_triplet(processed_points, config.USE_POINTS)
+            live_draw_points = {k: dict(v) for k, v in draw_points.items()}
+            overlay_source = "live"
 
             display_frame_id = display_packet.frame_id
             frame_delta = display_frame_id - pred_frame_id if pred_frame_id >= 0 else -1
@@ -887,6 +889,7 @@ def main() -> None:
                 ):
                     draw_points = {k: dict(v) for k, v in last_overlay_points.items()}
                     hind_angle = last_overlay_hind_angle
+                    overlay_source = "hold"
                     if last_overlay_roi_shape is not None:
                         map_roi_shape = last_overlay_roi_shape
                     if last_overlay_infer_shape is not None:
@@ -895,6 +898,7 @@ def main() -> None:
                         map_roi_offset = last_overlay_roi_offset
                 else:
                     draw_points = {p: {"x": None, "y": None, "likelihood": None} for p in config.USE_POINTS}
+                    overlay_source = "none"
 
             # draw
             t_draw0 = time.perf_counter()
@@ -943,11 +947,17 @@ def main() -> None:
                 for p in processed_points.values()
                 if p["x"] is not None and p["y"] is not None and p["likelihood"] is not None
             )
+            live_draw_pt_keys = [
+                k
+                for k, v in live_draw_points.items()
+                if v["x"] is not None and v["y"] is not None and v["likelihood"] is not None
+            ]
             draw_pt_keys = [
                 k
                 for k, v in display_points.items()
                 if v["x"] is not None and v["y"] is not None and v["likelihood"] is not None
             ]
+            live_draw_count = len(live_draw_pt_keys)
             draw_count = len(draw_pt_keys)
 
             triplet_log_every_n = int(getattr(config, "TRIPLET_LOG_EVERY_N_FRAMES", 0))
@@ -958,11 +968,13 @@ def main() -> None:
             )
             if should_log_triplet:
                 logger.info(
-                    "raw=%d filt=%d draw=%d triplet=%s age=%.1f draw_pts=%s reason=%s",
+                    "raw=%d filt=%d draw_live=%d draw_render=%d triplet=%s source=%s age=%.1f draw_pts=%s reason=%s",
                     len(processed_points),
                     filt_count,
+                    live_draw_count,
                     draw_count,
                     has_triplet,
+                    overlay_source,
                     pred_age_ms,
                     draw_pt_keys,
                     reason_dict,

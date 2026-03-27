@@ -88,9 +88,9 @@ LOG_PATH = Path(r"C:\dlc\DLC_OBS_Spinal_cord_stimulation\rt_dlc_debug.log")
 LOG_EVERY_N_FRAMES = 30
 # Диагностика триплета (raw/filt/draw/reason) может быть дорогой при логировании каждого кадра.
 # 0 = отключить периодический лог, >0 = писать раз в N кадров.
-TRIPLET_LOG_EVERY_N_FRAMES = 10
+TRIPLET_LOG_EVERY_N_FRAMES = 30
 # Дополнительно писать строку сразу при смене состояния (triplet -> no-triplet и обратно).
-TRIPLET_LOG_ON_STATE_CHANGE = True
+TRIPLET_LOG_ON_STATE_CHANGE = False
 BENCHMARK_CSV_PATH = Path(r"C:\dlc\DLC_OBS_Spinal_cord_stimulation\rt_dlc_benchmark.csv")
 ENABLE_BENCHMARK_LOG_ROW = True
 
