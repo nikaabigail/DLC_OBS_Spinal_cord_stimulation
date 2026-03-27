@@ -180,17 +180,19 @@ def safe_angle_deg(
     b: tuple[float, float],
     c: tuple[float, float],
 ) -> Optional[float]:
-    ba = np.array(a, dtype=np.float32) - np.array(b, dtype=np.float32)
-    bc = np.array(c, dtype=np.float32) - np.array(b, dtype=np.float32)
+    bax = float(a[0] - b[0])
+    bay = float(a[1] - b[1])
+    bcx = float(c[0] - b[0])
+    bcy = float(c[1] - b[1])
 
-    n1 = np.linalg.norm(ba)
-    n2 = np.linalg.norm(bc)
+    n1 = math.hypot(bax, bay)
+    n2 = math.hypot(bcx, bcy)
     if n1 < 1e-6 or n2 < 1e-6:
         return None
 
-    cos_val = float(np.dot(ba, bc) / (n1 * n2))
-    cos_val = float(np.clip(cos_val, -1.0, 1.0))
-    return float(np.degrees(np.arccos(cos_val)))
+    cos_val = (bax * bcx + bay * bcy) / (n1 * n2)
+    cos_val = max(-1.0, min(1.0, cos_val))
+    return math.degrees(math.acos(cos_val))
 
 
 def dist2d(p1: tuple[float, float], p2: tuple[float, float]) -> float:
@@ -257,6 +259,30 @@ def validate_runtime_config() -> None:
         raise ValueError("INFER_EVERY_N_FRAMES must be positive.")
     if getattr(config, "TARGET_INFER_FPS", 1.0) <= 0:
         raise ValueError("TARGET_INFER_FPS must be positive.")
+    if getattr(config, "FORCE_FIXED_ROI", False) and getattr(config, "AUTO_DETECT_CONTENT_ROI", False):
+        raise ValueError("AUTO_DETECT_CONTENT_ROI must be False when FORCE_FIXED_ROI=True.")
+    if getattr(config, "AUTO_START_ON_MOTION", False) and (
+        getattr(config, "SUPPRESS_LOW_MOTION", False) or getattr(config, "SKIP_NEAR_DUPLICATE_FRAMES", False)
+    ):
+        raise ValueError(
+            "With AUTO_START_ON_MOTION=True, disable SUPPRESS_LOW_MOTION and SKIP_NEAR_DUPLICATE_FRAMES "
+            "to avoid conflicting gating states."
+        )
+
+    src_fps = float(getattr(config, "VIDEO_TARGET_FPS", 0.0) if getattr(config, "USE_VIDEO_FILE", False) else getattr(config, "TARGET_VIDEO_FPS", 0.0))
+    if src_fps > 0:
+        physical_cap = src_fps / max(1, int(getattr(config, "INFER_EVERY_N_FRAMES", 1)))
+        if float(getattr(config, "TARGET_INFER_FPS", 1.0)) > physical_cap + 1e-6:
+            raise ValueError(
+                f"TARGET_INFER_FPS={config.TARGET_INFER_FPS} exceeds physical cap {physical_cap:.2f} "
+                f"for source_fps={src_fps} and INFER_EVERY_N_FRAMES={config.INFER_EVERY_N_FRAMES}."
+            )
+
+    stale_policy = getattr(config, "STALE_PRED_POLICY", "show")
+    if stale_policy not in {"show", "drop"}:
+        raise ValueError("STALE_PRED_POLICY must be either 'show' or 'drop'.")
+    if float(getattr(config, "STALE_PRED_MAX_MS", 0.0)) < 0:
+        raise ValueError("STALE_PRED_MAX_MS must be >= 0.")
 
 
 def setup_logger() -> logging.Logger:
@@ -549,12 +575,13 @@ def draw_overlay(
                 cv2.putText(out, label, (int(x) + 5, int(y) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
 
     y0 = 20
-    cv2.putText(out, f"STATUS: {'ACTIVE' if processing_active else 'WAITING'}", (10, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-    y0 += 25
-    cv2.putText(out, f"MOTION: {motion_score:.3f}", (10, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
-    if config.DRAW_FPS:
+    if getattr(config, "DEBUG_OVERLAY", False):
+        cv2.putText(out, f"STATUS: {'ACTIVE' if processing_active else 'WAITING'}", (10, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         y0 += 25
-        cv2.putText(out, f"CAM FPS: {fps_cam:.1f} | DLC FPS: {fps_dlc:.1f} | SKIP RATE: {skip_rate:.1f}%", (10, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        cv2.putText(out, f"MOTION: {motion_score:.3f}", (10, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
+        if config.DRAW_FPS:
+            y0 += 25
+            cv2.putText(out, f"CAM FPS: {fps_cam:.1f} | DLC FPS: {fps_dlc:.1f} | SKIP RATE: {skip_rate:.1f}%", (10, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
     if config.DRAW_HIND_ANGLE and hind_angle is not None:
         cv2.putText(out, f"Hind angle: {hind_angle:.1f}", (10, y0 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
@@ -579,7 +606,7 @@ def main() -> None:
     prev_motion_gray: Optional[np.ndarray] = None
     prev_cam_ts: Optional[float] = None
     prev_infer_ts_for_fps: Optional[float] = None
-    last_infer_submit_ts: Optional[float] = None
+    last_infer_submit_perf: Optional[float] = None
     fps_dlc = 0.0
     frame_buffer: deque[FramePacket] = deque(maxlen=config.MAX_FRAME_BUFFER)
     pred_buffer: deque[PredictionPacket] = deque(maxlen=config.MAX_PRED_BUFFER)
@@ -659,14 +686,15 @@ def main() -> None:
                         run_dlc = False
                         skip_reasons["skip_duplicate"] += 1
                 prev_frame_gray = gray_small
-            if run_dlc and last_infer_submit_ts is not None:
+            if run_dlc and last_infer_submit_perf is not None:
                 min_dt = 1.0 / max(1.0, config.TARGET_INFER_FPS)
-                if (time.time() - last_infer_submit_ts) < min_dt:
+                if (time.perf_counter() - last_infer_submit_perf) < min_dt:
                     run_dlc = False
                     skip_reasons["skip_fps"] += 1
 
             if run_dlc:
                 submit_ts = time.time()
+                submit_perf = time.perf_counter()
                 job = InferJob(
                     frame_id=frame_id,
                     infer_frame=infer_frame.copy(),
@@ -677,7 +705,7 @@ def main() -> None:
                 )
                 try:
                     infer_queue.put_nowait(job)
-                    last_infer_submit_ts = submit_ts
+                    last_infer_submit_perf = submit_perf
                 except Full:
                     # keep newest job if queue is full
                     skip_reasons["skip_infer_queue_full"] += 1
@@ -688,7 +716,7 @@ def main() -> None:
                         pass
                     try:
                         infer_queue.put_nowait(job)
-                        last_infer_submit_ts = submit_ts
+                        last_infer_submit_perf = submit_perf
                     except Full:
                         skip_reasons["skip_total"] += 1
             else:
@@ -750,6 +778,14 @@ def main() -> None:
                 map_roi_shape = (roi.shape[0], roi.shape[1])
                 map_infer_shape = (infer_frame.shape[0], infer_frame.shape[1])
                 map_roi_offset = roi_offset
+
+            stale_drop = (
+                pred_age_ms >= 0
+                and getattr(config, "STALE_PRED_POLICY", "show") == "drop"
+                and pred_age_ms > float(getattr(config, "STALE_PRED_MAX_MS", 0.0))
+            )
+            if stale_drop:
+                processed_points = {p: {"x": None, "y": None, "likelihood": None} for p in config.USE_POINTS}
 
             display_frame_id = display_packet.frame_id
             frame_delta = display_frame_id - pred_frame_id if pred_frame_id >= 0 else -1

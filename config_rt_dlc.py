@@ -102,5 +102,12 @@ DRAW_NAMES = True
 DRAW_CONF = False
 DRAW_HIND_ANGLE = True
 DRAW_FPS = True
+DEBUG_OVERLAY = False  # False: рабочий overlay (только точки/угол), True: диагностический текст
+
+# Политика устаревших предсказаний
+# "drop" — не рисовать точки, если предсказание слишком старое;
+# "show" — рисовать последнее доступное предсказание всегда.
+STALE_PRED_POLICY = "drop"
+STALE_PRED_MAX_MS = 80.0
 
 WINDOW_NAME = "OBS + DLC realtime"
