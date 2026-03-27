@@ -82,6 +82,9 @@ MEDIAN_WINDOW = 3               # online median window по x/y
 ENABLE_PCUTOFF = True
 ENABLE_DESPIKE = True
 ENABLE_HOLD = True
+# После длительной окклюзии разрешаем "перезахват" точки даже при большом скачке
+# относительно последней валидной позиции (иначе despike может блокировать возврат точки).
+DESPIKE_RESET_GAP_FRAMES = 20
 
 # Логи / диагностика
 LOG_PATH = Path(r"C:\dlc\DLC_OBS_Spinal_cord_stimulation\rt_dlc_debug.log")

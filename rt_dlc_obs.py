@@ -296,6 +296,8 @@ def validate_runtime_config() -> None:
         raise ValueError("DESPIKE_THRESHOLD_PX must be positive.")
     if config.MAX_HOLD_FRAMES < 0:
         raise ValueError("MAX_HOLD_FRAMES must be >= 0.")
+    if getattr(config, "DESPIKE_RESET_GAP_FRAMES", 0) < 0:
+        raise ValueError("DESPIKE_RESET_GAP_FRAMES must be >= 0.")
     if config.MEDIAN_WINDOW <= 0:
         raise ValueError("MEDIAN_WINDOW must be positive.")
     if not (0.0 <= config.CONF_THRESH_USE <= 1.0):
@@ -408,7 +410,10 @@ class OnlinePointFilter:
             current_xy = (float(x), float(y))
             if state.last_good_xy is not None:
                 jump = dist2d(current_xy, state.last_good_xy)
-                if jump > config.DESPIKE_THRESHOLD_PX:
+                last_idx = state.last_good_frame_idx
+                gap = (frame_idx - last_idx) if last_idx is not None else 0
+                allow_reacquire = gap > int(getattr(config, "DESPIKE_RESET_GAP_FRAMES", 0))
+                if jump > config.DESPIKE_THRESHOLD_PX and not allow_reacquire:
                     is_good = False
 
         if is_good:
