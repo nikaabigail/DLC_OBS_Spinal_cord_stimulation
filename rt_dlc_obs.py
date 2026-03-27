@@ -303,6 +303,8 @@ def validate_runtime_config() -> None:
         raise ValueError("STALE_PRED_POLICY must be either 'show' or 'drop'.")
     if float(getattr(config, "STALE_PRED_MAX_MS", 0.0)) < 0:
         raise ValueError("STALE_PRED_MAX_MS must be >= 0.")
+    if float(getattr(config, "OVERLAY_HOLD_MS", 0.0)) < 0:
+        raise ValueError("OVERLAY_HOLD_MS must be >= 0.")
 
 
 def setup_logger() -> logging.Logger:
@@ -627,6 +629,12 @@ def main() -> None:
     prev_cam_ts: Optional[float] = None
     prev_infer_ts_for_fps: Optional[float] = None
     last_infer_submit_perf: Optional[float] = None
+    last_overlay_points: Optional[dict[str, dict[str, float | None]]] = None
+    last_overlay_hind_angle: Optional[float] = None
+    last_overlay_ts: Optional[float] = None
+    last_overlay_roi_shape: Optional[tuple[int, int]] = None
+    last_overlay_infer_shape: Optional[tuple[int, int]] = None
+    last_overlay_roi_offset: Optional[tuple[int, int]] = None
     fps_dlc = 0.0
     frame_buffer: deque[FramePacket] = deque(maxlen=config.MAX_FRAME_BUFFER)
     pred_buffer: deque[PredictionPacket] = deque(maxlen=config.MAX_PRED_BUFFER)
@@ -821,6 +829,34 @@ def main() -> None:
                 a, b, c = processed_points.get(p1), processed_points.get(p2), processed_points.get(p3)
                 if a and b and c and all(v is not None for v in [a["x"], a["y"], b["x"], b["y"], c["x"], c["y"]]):
                     hind_angle = safe_angle_deg((float(a["x"]), float(a["y"])), (float(b["x"]), float(b["y"])), (float(c["x"]), float(c["y"])))
+
+            has_valid_points = any(
+                p["x"] is not None and p["y"] is not None and p["likelihood"] is not None
+                for p in processed_points.values()
+            )
+            if has_valid_points:
+                last_overlay_points = {k: dict(v) for k, v in processed_points.items()}
+                last_overlay_hind_angle = hind_angle
+                last_overlay_ts = display_ts
+                last_overlay_roi_shape = map_roi_shape
+                last_overlay_infer_shape = map_infer_shape
+                last_overlay_roi_offset = map_roi_offset
+            else:
+                hold_ms = float(getattr(config, "OVERLAY_HOLD_MS", 0.0))
+                if (
+                    hold_ms > 0
+                    and last_overlay_points is not None
+                    and last_overlay_ts is not None
+                    and (display_ts - last_overlay_ts) * 1000.0 <= hold_ms
+                ):
+                    processed_points = {k: dict(v) for k, v in last_overlay_points.items()}
+                    hind_angle = last_overlay_hind_angle
+                    if last_overlay_roi_shape is not None:
+                        map_roi_shape = last_overlay_roi_shape
+                    if last_overlay_infer_shape is not None:
+                        map_infer_shape = last_overlay_infer_shape
+                    if last_overlay_roi_offset is not None:
+                        map_roi_offset = last_overlay_roi_offset
 
             # draw
             t_draw0 = time.perf_counter()

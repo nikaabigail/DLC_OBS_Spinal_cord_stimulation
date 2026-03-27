@@ -7,7 +7,7 @@ CAM_INDEX = 2
 USE_VIDEO_FILE = True
 VIDEO_FILE_PATH = r"C:\dlc\videos\6_MER2-230-168U3C(FDE22070174)_20240604_170308.avi"
 VIDEO_TARGET_FPS = 60.0
-VIDEO_SKIP_IF_BEHIND = True
+VIDEO_SKIP_IF_BEHIND = False  # False: не ускорять видео за счет дропа кадров
 FRAME_W = 1920
 FRAME_H = 1080  
 TARGET_VIDEO_FPS = 100.0
@@ -110,5 +110,6 @@ DEBUG_OVERLAY = False  # False: рабочий overlay (только точки/
 # "show" — рисовать последнее доступное предсказание всегда.
 STALE_PRED_POLICY = "drop"
 STALE_PRED_MAX_MS = 50.0
+OVERLAY_HOLD_MS = 120.0  # короткий latch последнего валидного overlay, чтобы убрать мигание
 
 WINDOW_NAME = "OBS + DLC realtime"
