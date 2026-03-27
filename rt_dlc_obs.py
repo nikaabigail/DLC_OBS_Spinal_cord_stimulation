@@ -250,6 +250,43 @@ def map_points_from_infer_to_display(
     return mapped
 
 
+def evaluate_triplet(
+    points: dict[str, dict[str, float | None]],
+    required_points: list[str],
+) -> tuple[dict[str, dict[str, float | None]], bool, dict[str, str]]:
+    """
+    Enforce all-or-nothing drawing for a required point set.
+    Returns:
+      - normalized draw_points dict (same keys as required_points),
+      - has_triplet flag,
+      - reason dict per point (ok/missing/low_conf/none_xy/none_likelihood).
+    """
+    draw_points: dict[str, dict[str, float | None]] = {}
+    reason: dict[str, str] = {}
+
+    for name in required_points:
+        p = points.get(name)
+        if p is None:
+            draw_points[name] = {"x": None, "y": None, "likelihood": None}
+            reason[name] = "missing"
+            continue
+
+        x, y, l = p.get("x"), p.get("y"), p.get("likelihood")
+        draw_points[name] = {"x": x, "y": y, "likelihood": l}
+
+        if x is None or y is None:
+            reason[name] = "none_xy"
+        elif l is None:
+            reason[name] = "none_likelihood"
+        elif l < config.CONF_THRESH_DRAW:
+            reason[name] = "low_conf"
+        else:
+            reason[name] = "ok"
+
+    has_triplet = all(reason.get(name) == "ok" for name in required_points)
+    return draw_points, has_triplet, reason
+
+
 def validate_runtime_config() -> None:
     if config.INFER_W <= 0 or config.INFER_H <= 0:
         raise ValueError("INFER_W and INFER_H must be positive.")
@@ -635,6 +672,7 @@ def main() -> None:
     last_overlay_roi_shape: Optional[tuple[int, int]] = None
     last_overlay_infer_shape: Optional[tuple[int, int]] = None
     last_overlay_roi_offset: Optional[tuple[int, int]] = None
+    prev_triplet_state: Optional[bool] = None
     fps_dlc = 0.0
     frame_buffer: deque[FramePacket] = deque(maxlen=config.MAX_FRAME_BUFFER)
     pred_buffer: deque[PredictionPacket] = deque(maxlen=config.MAX_PRED_BUFFER)
@@ -818,6 +856,8 @@ def main() -> None:
             if stale_drop:
                 processed_points = {p: {"x": None, "y": None, "likelihood": None} for p in config.USE_POINTS}
 
+            draw_points, has_triplet, reason_dict = evaluate_triplet(processed_points, config.USE_POINTS)
+
             display_frame_id = display_packet.frame_id
             frame_delta = display_frame_id - pred_frame_id if pred_frame_id >= 0 else -1
             display_buffer_ms_actual = (display_ts - display_packet.capture_ts) * 1000.0
@@ -826,16 +866,12 @@ def main() -> None:
             hind_angle = None
             if config.COMPUTE_HIND_ANGLE:
                 p1, p2, p3 = config.HIND_ANGLE_POINTS
-                a, b, c = processed_points.get(p1), processed_points.get(p2), processed_points.get(p3)
+                a, b, c = draw_points.get(p1), draw_points.get(p2), draw_points.get(p3)
                 if a and b and c and all(v is not None for v in [a["x"], a["y"], b["x"], b["y"], c["x"], c["y"]]):
                     hind_angle = safe_angle_deg((float(a["x"]), float(a["y"])), (float(b["x"]), float(b["y"])), (float(c["x"]), float(c["y"])))
 
-            has_valid_points = any(
-                p["x"] is not None and p["y"] is not None and p["likelihood"] is not None
-                for p in processed_points.values()
-            )
-            if has_valid_points:
-                last_overlay_points = {k: dict(v) for k, v in processed_points.items()}
+            if has_triplet:
+                last_overlay_points = {k: dict(v) for k, v in draw_points.items()}
                 last_overlay_hind_angle = hind_angle
                 last_overlay_ts = display_ts
                 last_overlay_roi_shape = map_roi_shape
@@ -849,7 +885,7 @@ def main() -> None:
                     and last_overlay_ts is not None
                     and (display_ts - last_overlay_ts) * 1000.0 <= hold_ms
                 ):
-                    processed_points = {k: dict(v) for k, v in last_overlay_points.items()}
+                    draw_points = {k: dict(v) for k, v in last_overlay_points.items()}
                     hind_angle = last_overlay_hind_angle
                     if last_overlay_roi_shape is not None:
                         map_roi_shape = last_overlay_roi_shape
@@ -857,19 +893,21 @@ def main() -> None:
                         map_infer_shape = last_overlay_infer_shape
                     if last_overlay_roi_offset is not None:
                         map_roi_offset = last_overlay_roi_offset
+                else:
+                    draw_points = {p: {"x": None, "y": None, "likelihood": None} for p in config.USE_POINTS}
 
             # draw
             t_draw0 = time.perf_counter()
             if config.SHOW_FULL_FRAME:
                 display_points = map_points_from_infer_to_display(
-                    processed_points,
+                    draw_points,
                     roi_shape=map_roi_shape,
                     infer_shape=map_infer_shape,
                     roi_offset=map_roi_offset,
                 )
                 display = display_packet.frame.copy()
             else:
-                display_points = processed_points
+                display_points = draw_points
                 display_roi, _ = resolve_roi(display_packet.frame)
                 display = resize_for_infer(display_roi)
 
@@ -899,6 +937,37 @@ def main() -> None:
 
             stats["latency_ms"] += (display_ts - display_packet.capture_ts) * 1000.0
             stats["latency_count"] += 1
+
+            filt_count = sum(
+                1
+                for p in processed_points.values()
+                if p["x"] is not None and p["y"] is not None and p["likelihood"] is not None
+            )
+            draw_pt_keys = [
+                k
+                for k, v in display_points.items()
+                if v["x"] is not None and v["y"] is not None and v["likelihood"] is not None
+            ]
+            draw_count = len(draw_pt_keys)
+
+            triplet_log_every_n = int(getattr(config, "TRIPLET_LOG_EVERY_N_FRAMES", 0))
+            state_changed = prev_triplet_state is None or (has_triplet != prev_triplet_state)
+            should_log_triplet = (
+                (triplet_log_every_n > 0 and frame_id % triplet_log_every_n == 0)
+                or (bool(getattr(config, "TRIPLET_LOG_ON_STATE_CHANGE", True)) and state_changed)
+            )
+            if should_log_triplet:
+                logger.info(
+                    "raw=%d filt=%d draw=%d triplet=%s age=%.1f draw_pts=%s reason=%s",
+                    len(processed_points),
+                    filt_count,
+                    draw_count,
+                    has_triplet,
+                    pred_age_ms,
+                    draw_pt_keys,
+                    reason_dict,
+                )
+            prev_triplet_state = has_triplet
 
             if frame_id % max(1, config.LOG_EVERY_N_FRAMES) == 0:
                 raw_vis = stats["raw_visible"] / max(1.0, stats["total_points"]) * 100.0
