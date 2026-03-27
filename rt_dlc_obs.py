@@ -3,14 +3,11 @@ from __future__ import annotations
 import csv
 import logging
 import math
-import logging
 import time
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
-from queue import Empty, Full, Queue
-from threading import Event, Lock, Thread
 from typing import Optional
 
 import cv2
@@ -187,6 +184,33 @@ def detect_content_roi(
 
 def resize_for_infer(frame: np.ndarray) -> np.ndarray:
     return cv2.resize(frame, (config.INFER_W, config.INFER_H), interpolation=cv2.INTER_LINEAR)
+
+
+def resolve_roi(frame: np.ndarray) -> tuple[np.ndarray, tuple[int, int]]:
+    """
+    Choose ROI according to config priority:
+    1) FORCE_FIXED_ROI + USE_ROI -> fixed ROI from config.ROI
+    2) AUTO_DETECT_CONTENT_ROI -> dynamic non-black content ROI
+    3) full frame
+    """
+    if getattr(config, "FORCE_FIXED_ROI", False) and getattr(config, "USE_ROI", False):
+        return crop_roi(frame), (config.ROI[0], config.ROI[1])
+
+    if getattr(config, "AUTO_DETECT_CONTENT_ROI", False):
+        detected = detect_content_roi(
+            frame,
+            black_thresh=getattr(config, "CONTENT_BLACK_THRESH", 12),
+            min_row_fill=getattr(config, "CONTENT_MIN_ROW_FILL", 0.08),
+            min_col_fill=getattr(config, "CONTENT_MIN_COL_FILL", 0.03),
+        )
+        if detected is not None:
+            x1, y1, x2, y2 = detected
+            return frame[y1:y2, x1:x2], (x1, y1)
+
+    if getattr(config, "USE_ROI", False):
+        return crop_roi(frame), (config.ROI[0], config.ROI[1])
+
+    return frame, (0, 0)
 
 
 def safe_angle_deg(
@@ -419,20 +443,6 @@ class DLCRealtimePredictor:
         )
         print("[INFO] DLC pose inference runner initialized.")
 
-    @staticmethod
-    def _normalize_poses(poses_raw: object) -> np.ndarray:
-        poses = np.asarray(poses_raw)
-        if poses.ndim == 3 and poses.shape[0] == 1:
-            poses = poses[0]
-        elif poses.ndim == 3 and poses.shape[1] == 1:
-            poses = poses[:, 0, :]
-        elif poses.ndim == 1 and poses.shape[0] >= 3:
-            poses = poses.reshape(1, -1)
-
-        if poses.ndim != 2 or poses.shape[1] < 3:
-            raise RuntimeError(f"Unexpected poses shape: {poses.shape}. Expected [N,3] or [1,N,3].")
-        return poses
-
     def predict_frame(self, frame_bgr: np.ndarray) -> dict[str, dict[str, float | None]]:
         if self.runner is None:
             raise RuntimeError("Runner is not initialized.")
@@ -520,43 +530,13 @@ def draw_overlay(
     cv2.putText(out, f"STATUS: {'ACTIVE' if processing_active else 'WAITING'}", (10, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
     y0 += 25
     cv2.putText(out, f"MOTION: {motion_score:.3f}", (10, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
-    y0 += 25
-    cv2.putText(out, f"CAM FPS: {fps_cam:.1f} | DLC FPS: {fps_dlc:.1f} | SKIP RATE: {skip_rate:.1f}%", (10, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+    if config.DRAW_FPS:
+        y0 += 25
+        cv2.putText(out, f"CAM FPS: {fps_cam:.1f} | DLC FPS: {fps_dlc:.1f} | SKIP RATE: {skip_rate:.1f}%", (10, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
     if config.DRAW_HIND_ANGLE and hind_angle is not None:
         cv2.putText(out, f"Hind angle: {hind_angle:.1f}", (10, y0 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
     return out
-
-
-def setup_logger() -> logging.Logger:
-    logger = logging.getLogger("rt_dlc")
-    if logger.handlers:
-        return logger
-    logger.setLevel(logging.INFO)
-    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
-    sh = logging.StreamHandler()
-    sh.setFormatter(fmt)
-    logger.addHandler(sh)
-    fh = logging.FileHandler(config.LOG_PATH, encoding="utf-8")
-    fh.setFormatter(fmt)
-    logger.addHandler(fh)
-    return logger
-
-
-def validate_runtime_config() -> None:
-    if config.INFER_W <= 0 or config.INFER_H <= 0:
-        raise ValueError("INFER_W and INFER_H must be positive.")
-    if config.INFER_EVERY_N_FRAMES <= 0:
-        raise ValueError("INFER_EVERY_N_FRAMES must be positive.")
-    if config.TARGET_INFER_FPS <= 0:
-        raise ValueError("TARGET_INFER_FPS must be positive.")
-    if config.DISPLAY_BUFFER_MS < 0:
-        raise ValueError("DISPLAY_BUFFER_MS must be >= 0.")
-    if config.MAX_FRAME_BUFFER <= 0 or config.MAX_PRED_BUFFER <= 0:
-        raise ValueError("MAX_FRAME_BUFFER and MAX_PRED_BUFFER must be positive.")
-    if config.USE_VIDEO_FILE and not Path(config.VIDEO_FILE_PATH).exists():
-        raise FileNotFoundError(f"VIDEO_FILE_PATH does not exist: {config.VIDEO_FILE_PATH}")
-
 
 def main() -> None:
     validate_runtime_config()
@@ -608,8 +588,7 @@ def main() -> None:
 
         # preprocess
         t_pre0 = time.perf_counter()
-        roi_offset = (config.ROI[0], config.ROI[1]) if config.USE_ROI else (0, 0)
-        roi = crop_roi(frame)
+        roi, roi_offset = resolve_roi(frame)
         infer_frame = resize_for_infer(roi)
         t_pre1 = time.perf_counter()
         stats["t_pre_ms"] += (t_pre1 - t_pre0) * 1000.0
@@ -622,10 +601,15 @@ def main() -> None:
         prev_motion_gray = gray_small
 
         # admission control
-        run_dlc = True
+        processing_active = (not getattr(config, "AUTO_START_ON_MOTION", False)) or (
+            motion_score >= float(getattr(config, "FRAME_DIFF_THRESHOLD", 0.0))
+        )
+        run_dlc = processing_active
         if frame_id % max(1, config.INFER_EVERY_N_FRAMES) != 0:
             run_dlc = False
             skip_reasons["skip_n"] += 1
+        if not processing_active:
+            skip_reasons["skip_waiting_motion"] += 1
         if run_dlc and config.SUPPRESS_LOW_MOTION and motion_score < config.LOW_MOTION_THRESHOLD:
             run_dlc = False
             skip_reasons["skip_motion"] += 1
@@ -775,7 +759,16 @@ def main() -> None:
 
         skip_rate = (skip_reasons["skip_total"] / max(1.0, stats["frames"])) * 100.0
 
-        display = draw_overlay(display, display_points, stats.get("fps_cam", 0.0), fps_dlc, skip_rate, hind_angle, True, motion_score)
+        display = draw_overlay(
+            display,
+            display_points,
+            stats.get("fps_cam", 0.0),
+            fps_dlc,
+            skip_rate,
+            hind_angle,
+            processing_active,
+            motion_score,
+        )
         t_draw1 = time.perf_counter()
         stats["t_draw_ms"] += (t_draw1 - t_draw0) * 1000.0
 
