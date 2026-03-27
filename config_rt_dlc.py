@@ -12,7 +12,9 @@ FRAME_W = 1920
 FRAME_H = 1080  
 TARGET_VIDEO_FPS = 100.0
 SHOW_SCALE = 0.8
-AUTO_START_ON_MOTION = True
+# Для стабильной онлайн-оценки угла лучше не ждать движения:
+# стартуем инференс сразу, иначе первые полезные кадры теряются.
+AUTO_START_ON_MOTION = False
 FRAME_DIFF_THRESHOLD = 0.5
 
 SKIP_NEAR_DUPLICATE_FRAMES = False 
@@ -21,23 +23,24 @@ SUPPRESS_LOW_MOTION = False
 LOW_MOTION_THRESHOLD = 0.20 # средняя разница по grayscale для определения "низкого движения"
 
 SHOW_FULL_FRAME = True
-DISPLAY_BUFFER_MS = 50  # сколько миллисекунд держать кадр в буфере для отображения (для синхронизации с инференсом)
+DISPLAY_BUFFER_MS = 20  # меньше буфер = меньше визуальная задержка (для closed-loop)
 MAX_FRAME_BUFFER = 8 # макс кол-во кадров в буфере для отображения (на случай, если инференс отстает)
 MAX_PRED_BUFFER = 8 # макс кол-во предсказаний в буфере (на случай, если инференс отстает, чтобы не держать слишком много старых предсказаний)
+INFER_QUEUE_MAXSIZE = 1 # latest-only: не накапливать очередь старых кадров в инференс
 
 # Размер кадра, который подаем в DLC
 # Для боковой дорожки обычно разумно сначала резать ROI, потом уменьшать.
 INFER_W = 1920
 INFER_H = 220
-INFER_EVERY_N_FRAMES = 3        # жесткий throttling: инференс не на каждый кадр
-TARGET_INFER_FPS = 35.0         # дополнительный лимит частоты запуска инференса
+INFER_EVERY_N_FRAMES = 2        # на входе 60 FPS дает целевой ритм около 30 запусков/с
+TARGET_INFER_FPS = 30.0         # согласованный soft-limit для стабильного realtime без лишнего throttle
 
 # ROI на исходном OBS-кадре (если нужно вырезать дорожку с мышью)
 # Формат: x1, y1, x2, y2
-USE_ROI = False
+USE_ROI = True
 ROI = (0, 430, 1920, 649)
-FORCE_FIXED_ROI = True          # фиксированный ROI приоритетнее auto detect
-AUTO_DETECT_CONTENT_ROI = False # авто-вырезка непустой области (убирает черные поля)
+FORCE_FIXED_ROI = True          # основной режим для closed-loop: стабильная геометрия
+AUTO_DETECT_CONTENT_ROI = False # оставлено выключенным: не использовать в основном runtime
 CONTENT_BLACK_THRESH = 12       # пиксели темнее порога считаем "черным полем"
 CONTENT_MIN_ROW_FILL = 0.08     # минимум заполнения строки не-черными пикселями
 CONTENT_MIN_COL_FILL = 0.03     # минимум заполнения столбца не-черными пикселями
@@ -100,5 +103,12 @@ DRAW_NAMES = True
 DRAW_CONF = False
 DRAW_HIND_ANGLE = True
 DRAW_FPS = True
+DEBUG_OVERLAY = False  # False: рабочий overlay (только точки/угол), True: диагностический текст
+
+# Политика устаревших предсказаний
+# "drop" — не рисовать точки, если предсказание слишком старое;
+# "show" — рисовать последнее доступное предсказание всегда.
+STALE_PRED_POLICY = "drop"
+STALE_PRED_MAX_MS = 50.0
 
 WINDOW_NAME = "OBS + DLC realtime"
