@@ -672,6 +672,7 @@ def main() -> None:
     last_overlay_roi_shape: Optional[tuple[int, int]] = None
     last_overlay_infer_shape: Optional[tuple[int, int]] = None
     last_overlay_roi_offset: Optional[tuple[int, int]] = None
+    prev_triplet_state: Optional[bool] = None
     fps_dlc = 0.0
     frame_buffer: deque[FramePacket] = deque(maxlen=config.MAX_FRAME_BUFFER)
     pred_buffer: deque[PredictionPacket] = deque(maxlen=config.MAX_PRED_BUFFER)
@@ -937,16 +938,36 @@ def main() -> None:
             stats["latency_ms"] += (display_ts - display_packet.capture_ts) * 1000.0
             stats["latency_count"] += 1
 
-            logger.info(
-                "raw=%d filt=%d draw=%d triplet=%s age=%.1f draw_pts=%s reason=%s",
-                len(processed_points),
-                sum(1 for p in processed_points.values() if p["x"] is not None and p["y"] is not None and p["likelihood"] is not None),
-                sum(1 for p in display_points.values() if p["x"] is not None and p["y"] is not None and p["likelihood"] is not None),
-                has_triplet,
-                pred_age_ms,
-                [k for k, v in display_points.items() if v["x"] is not None and v["y"] is not None and v["likelihood"] is not None],
-                reason_dict,
+            filt_count = sum(
+                1
+                for p in processed_points.values()
+                if p["x"] is not None and p["y"] is not None and p["likelihood"] is not None
             )
+            draw_pt_keys = [
+                k
+                for k, v in display_points.items()
+                if v["x"] is not None and v["y"] is not None and v["likelihood"] is not None
+            ]
+            draw_count = len(draw_pt_keys)
+
+            triplet_log_every_n = int(getattr(config, "TRIPLET_LOG_EVERY_N_FRAMES", 0))
+            state_changed = prev_triplet_state is None or (has_triplet != prev_triplet_state)
+            should_log_triplet = (
+                (triplet_log_every_n > 0 and frame_id % triplet_log_every_n == 0)
+                or (bool(getattr(config, "TRIPLET_LOG_ON_STATE_CHANGE", True)) and state_changed)
+            )
+            if should_log_triplet:
+                logger.info(
+                    "raw=%d filt=%d draw=%d triplet=%s age=%.1f draw_pts=%s reason=%s",
+                    len(processed_points),
+                    filt_count,
+                    draw_count,
+                    has_triplet,
+                    pred_age_ms,
+                    draw_pt_keys,
+                    reason_dict,
+                )
+            prev_triplet_state = has_triplet
 
             if frame_id % max(1, config.LOG_EVERY_N_FRAMES) == 0:
                 raw_vis = stats["raw_visible"] / max(1.0, stats["total_points"]) * 100.0
