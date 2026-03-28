@@ -6,6 +6,11 @@ from pathlib import Path
 CAM_INDEX = 2
 USE_VIDEO_FILE = True
 VIDEO_FILE_PATH = r"C:\dlc\videos\6_MER2-230-168U3C(FDE22070174)_20240604_170308.avi"
+USE_DUAL_VIDEO_FILES = False
+VIDEO_FILE_PATHS = [
+    r"C:\dlc\videos\left.avi",
+    r"C:\dlc\videos\right.avi",
+]
 VIDEO_TARGET_FPS = 60.0
 VIDEO_SKIP_IF_BEHIND = False  # False: не ускорять видео за счет дропа кадров
 FRAME_W = 1920
@@ -68,6 +73,11 @@ USE_POINTS = [
     "hl_ankle_r",
     "hl_toes_r",
 ]
+# Кандидаты для авто-определения стороны (по суммарной уверенности триплета).
+SIDE_POINT_SETS = {
+    "right": ("hl_hip_r", "hl_ankle_r", "hl_toes_r"),
+    "left": ("hl_hip_l", "hl_ankle_l", "hl_toes_l"),
+}
 
 # Для отрисовки
 CONF_THRESH_DRAW = 0.3
@@ -82,10 +92,18 @@ MEDIAN_WINDOW = 3               # online median window по x/y
 ENABLE_PCUTOFF = True
 ENABLE_DESPIKE = True
 ENABLE_HOLD = True
+# После длительной окклюзии разрешаем "перезахват" точки даже при большом скачке
+# относительно последней валидной позиции (иначе despike может блокировать возврат точки).
+DESPIKE_RESET_GAP_FRAMES = 20
 
 # Логи / диагностика
 LOG_PATH = Path(r"C:\dlc\DLC_OBS_Spinal_cord_stimulation\rt_dlc_debug.log")
 LOG_EVERY_N_FRAMES = 30
+# Диагностика триплета (raw/filt/draw/reason) может быть дорогой при логировании каждого кадра.
+# 0 = отключить периодический лог, >0 = писать раз в N кадров.
+TRIPLET_LOG_EVERY_N_FRAMES = 30
+# Дополнительно писать строку сразу при смене состояния (triplet -> no-triplet и обратно).
+TRIPLET_LOG_ON_STATE_CHANGE = False
 BENCHMARK_CSV_PATH = Path(r"C:\dlc\DLC_OBS_Spinal_cord_stimulation\rt_dlc_benchmark.csv")
 ENABLE_BENCHMARK_LOG_ROW = True
 
