@@ -34,6 +34,7 @@ class StreamState:
     last_overlay_points: Optional[dict[str, dict[str, float | None]]] = None
     last_overlay_hind_angle: Optional[float] = None
     last_overlay_ts: Optional[float] = None
+    last_filtered_points: Optional[dict[str, dict[str, float | None]]] = None
 
 
 def _canonical_triplet(points: dict[str, dict[str, float | None]], side_points: tuple[str, str, str]) -> dict[str, dict[str, float | None]]:
@@ -105,12 +106,17 @@ def process_stream_frame(
     roi, roi_offset = resolve_roi(frame)
     infer_frame = resize_for_infer(roi)
 
-    raw_points = predictor.predict_frame(infer_frame)
-
-    filtered_points: dict[str, dict[str, float | None]] = {}
-    for name, p in raw_points.items():
-        x, y, l = stream.point_filter.process_point(name, p["x"], p["y"], p["likelihood"], stream.frame_id)
-        filtered_points[name] = {"x": x, "y": y, "likelihood": l}
+    run_infer = stream.frame_id % max(1, int(getattr(config, "INFER_EVERY_N_FRAMES", 1))) == 0
+    if run_infer or stream.last_filtered_points is None:
+        raw_points = predictor.predict_frame(infer_frame)
+        filtered_points: dict[str, dict[str, float | None]] = {}
+        for name, p in raw_points.items():
+            x, y, l = stream.point_filter.process_point(name, p["x"], p["y"], p["likelihood"], stream.frame_id)
+            filtered_points[name] = {"x": x, "y": y, "likelihood": l}
+        stream.last_filtered_points = {k: dict(v) for k, v in filtered_points.items()}
+    else:
+        raw_points = {}
+        filtered_points = {k: dict(v) for k, v in stream.last_filtered_points.items()}
 
     picked_side, picked_side_points = pick_side(filtered_points)
     side_points_dict = _canonical_triplet(filtered_points, picked_side_points)
@@ -158,18 +164,20 @@ def process_stream_frame(
         motion_score=0.0,
     )
 
-    logger.info(
-        "stream=%s frame=%d side=%s raw=%d filt=%d draw=%d triplet=%s source=%s reason=%s",
-        stream.name,
-        stream.frame_id,
-        picked_side,
-        len(raw_points),
-        sum(1 for p in filtered_points.values() if p["x"] is not None and p["y"] is not None and p["likelihood"] is not None),
-        sum(1 for p in display_points.values() if p["x"] is not None and p["y"] is not None and p["likelihood"] is not None),
-        has_triplet,
-        overlay_source,
-        reason,
-    )
+    if stream.frame_id % max(1, int(getattr(config, "LOG_EVERY_N_FRAMES", 30))) == 0:
+        logger.info(
+            "stream=%s frame=%d side=%s infer=%s raw=%d filt=%d draw=%d triplet=%s source=%s reason=%s",
+            stream.name,
+            stream.frame_id,
+            picked_side,
+            run_infer,
+            len(raw_points),
+            sum(1 for p in filtered_points.values() if p["x"] is not None and p["y"] is not None and p["likelihood"] is not None),
+            sum(1 for p in display_points.values() if p["x"] is not None and p["y"] is not None and p["likelihood"] is not None),
+            has_triplet,
+            overlay_source,
+            reason,
+        )
 
     cv2.putText(display, f"Stream: {stream.name} | side: {picked_side}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     return True, display
@@ -212,14 +220,12 @@ def main() -> None:
             if not ok_l or not ok_r or frame_l is None or frame_r is None:
                 break
 
-            if frame_l.shape[0] != frame_r.shape[0]:
-                frame_r = cv2.resize(frame_r, (frame_r.shape[1], frame_l.shape[0]))
-            combined = cv2.hconcat([frame_l, frame_r])
-
             if config.SHOW_SCALE != 1.0:
-                combined = cv2.resize(combined, None, fx=config.SHOW_SCALE, fy=config.SHOW_SCALE, interpolation=cv2.INTER_AREA)
+                frame_l = cv2.resize(frame_l, None, fx=config.SHOW_SCALE, fy=config.SHOW_SCALE, interpolation=cv2.INTER_AREA)
+                frame_r = cv2.resize(frame_r, None, fx=config.SHOW_SCALE, fy=config.SHOW_SCALE, interpolation=cv2.INTER_AREA)
 
-            cv2.imshow(f"{config.WINDOW_NAME} | dual", combined)
+            cv2.imshow(f"{config.WINDOW_NAME} | left_cam", frame_l)
+            cv2.imshow(f"{config.WINDOW_NAME} | right_cam", frame_r)
             key = cv2.waitKey(1) & 0xFF
             if key in (27, ord("q")):
                 break
