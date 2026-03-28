@@ -290,6 +290,8 @@ def evaluate_triplet(
 def validate_runtime_config() -> None:
     if config.INFER_W <= 0 or config.INFER_H <= 0:
         raise ValueError("INFER_W and INFER_H must be positive.")
+    if getattr(config, "DUAL_INFER_W", config.INFER_W) <= 0 or getattr(config, "DUAL_INFER_H", config.INFER_H) <= 0:
+        raise ValueError("DUAL_INFER_W and DUAL_INFER_H must be positive.")
     if config.SHOW_SCALE <= 0:
         raise ValueError("SHOW_SCALE must be positive.")
     if config.DESPIKE_THRESHOLD_PX <= 0:

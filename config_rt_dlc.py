@@ -11,6 +11,12 @@ VIDEO_FILE_PATHS = [
     r"C:\dlc\videos\left.avi",
     r"C:\dlc\videos\right.avi",
 ]
+# Производительность dual-режима (2 потока): ограничиваем инференс на поток,
+# иначе 2x full-rate DLC приводит к сильному лагу.
+DUAL_TARGET_INFER_FPS_PER_STREAM = 10.0
+DUAL_STAGGER_INFER = True  # True: запускать инференс потоков по очереди (left/right)
+DUAL_INFER_W = 1280
+DUAL_INFER_H = 160
 VIDEO_TARGET_FPS = 60.0
 VIDEO_SKIP_IF_BEHIND = False  # False: не ускорять видео за счет дропа кадров
 FRAME_W = 1920
