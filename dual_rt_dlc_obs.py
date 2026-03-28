@@ -49,12 +49,46 @@ class StreamRuntime:
     fps_cam: float = 0.0
     prev_cam_ts: Optional[float] = None
     last_infer_submit_perf: Optional[float] = None
+    last_seen_infer_end_ts: Optional[float] = None
+    fps_dlc: float = 0.0
 
     last_overlay_points: Optional[dict[str, dict[str, float | None]]] = None
     last_overlay_hind_angle: Optional[float] = None
     last_overlay_ts: Optional[float] = None
 
     skip_busy_overwrite: int = 0
+    submit_attempts: int = 0
+
+
+def extrapolate_points(
+    prev_packet: PredictionPacket,
+    curr_packet: PredictionPacket,
+    now_ts: float,
+    max_extrapolate_ms: float,
+) -> dict[str, dict[str, float | None]]:
+    dt_pred = curr_packet.infer_end_ts - prev_packet.infer_end_ts
+    if dt_pred <= 1e-6:
+        return curr_packet.points
+
+    dt_now = max(0.0, now_ts - curr_packet.infer_end_ts)
+    dt_now = min(dt_now, max_extrapolate_ms / 1000.0)
+
+    out: dict[str, dict[str, float | None]] = {}
+    for name, cur in curr_packet.points.items():
+        prev = prev_packet.points.get(name, {"x": None, "y": None, "likelihood": None})
+        cx, cy, cl = cur["x"], cur["y"], cur["likelihood"]
+        px, py = prev["x"], prev["y"]
+        if cx is None or cy is None or cl is None or px is None or py is None:
+            out[name] = dict(cur)
+            continue
+        vx = (float(cx) - float(px)) / dt_pred
+        vy = (float(cy) - float(py)) / dt_pred
+        out[name] = {
+            "x": float(cx) + vx * dt_now,
+            "y": float(cy) + vy * dt_now,
+            "likelihood": cl,
+        }
+    return out
 
 
 def resize_for_infer_dual(frame):
@@ -217,6 +251,7 @@ def main() -> None:
                         run_infer = False
 
                 if run_infer:
+                    rt.submit_attempts += 1
                     task = InferTask(
                         stream_name=rt.name,
                         frame_id=frame_id,
@@ -236,10 +271,16 @@ def main() -> None:
                     preds = list(rt.pred_buffer)
 
                 matched = None
+                prev_matched = None
                 for pred in reversed(preds):
                     if pred.frame_id <= frame_id:
                         matched = pred
                         break
+                if matched is not None:
+                    for pred in reversed(preds):
+                        if pred.frame_id < matched.frame_id:
+                            prev_matched = pred
+                            break
 
                 if matched is None:
                     processed_points = {p: {"x": None, "y": None, "likelihood": None} for p in candidate_points}
@@ -247,7 +288,23 @@ def main() -> None:
                     map_infer_shape = (infer_frame.shape[0], infer_frame.shape[1])
                     map_roi_offset = roi_offset
                 else:
+                    if rt.last_seen_infer_end_ts is not None:
+                        dt_inf = matched.infer_end_ts - rt.last_seen_infer_end_ts
+                        if dt_inf > 0:
+                            rt.fps_dlc = 1.0 / dt_inf
+                    rt.last_seen_infer_end_ts = matched.infer_end_ts
+
                     processed_points = matched.points
+                    if (
+                        bool(getattr(config, "DUAL_ENABLE_EXTRAPOLATION", True))
+                        and prev_matched is not None
+                    ):
+                        processed_points = extrapolate_points(
+                            prev_packet=prev_matched,
+                            curr_packet=matched,
+                            now_ts=time.time(),
+                            max_extrapolate_ms=float(getattr(config, "DUAL_EXTRAPOLATE_MAX_MS", 80.0)),
+                        )
                     map_roi_shape = matched.roi_shape
                     map_infer_shape = matched.infer_shape
                     map_roi_offset = matched.roi_offset
@@ -289,8 +346,8 @@ def main() -> None:
                     frame,
                     display_points,
                     fps_cam=rt.fps_cam,
-                    fps_dlc=0.0,
-                    skip_rate=0.0,
+                    fps_dlc=rt.fps_dlc,
+                    skip_rate=(rt.skip_busy_overwrite / max(1, rt.submit_attempts)) * 100.0,
                     hind_angle=hind_angle,
                     processing_active=True,
                     motion_score=0.0,
