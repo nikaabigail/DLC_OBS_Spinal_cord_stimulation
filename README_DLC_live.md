@@ -39,6 +39,8 @@ pip install deeplabcut-live[pytorch] --no-deps
 - модель: `MODEL_PATH`, `MODEL_TYPE`, `BODY_PARTS`;
 - геометрия инференса: `USE_ROI`, `ROI`, `INFER_W`, `INFER_H`;
 - отрисовка и логирование: `CONF_THRESH_DRAW`, `SHOW_SCALE`, `LOG_EVERY_N_FRAMES`.
+- детальная диагностика: `LOG_STAGE_TIMINGS`, `LOG_VISIBLE_BREAKDOWN`, `LOG_FRAME_SYNC`, `LOG_DROP_EVENTS`.
+- анти-замедление видеофайла: `VIDEO_SKIP_IF_BEHIND` и `MAX_CATCHUP_DROPS_PER_READ`.
 
 Поддерживается задание путей через переменные окружения:
 
@@ -52,3 +54,8 @@ pip install deeplabcut-live[pytorch] --no-deps
 
 Скрипт intentionally минималистичный: без online-фильтрации (median/despike/hold) из `rt_dlc_obs.py`.
 Если нужна максимальная стабильность точек, используйте `rt_dlc_obs.py`.
+
+Если видео визуально идёт медленнее реального времени, включите:
+
+- `VIDEO_SKIP_IF_BEHIND = True`
+- при необходимости увеличьте `MAX_CATCHUP_DROPS_PER_READ`.

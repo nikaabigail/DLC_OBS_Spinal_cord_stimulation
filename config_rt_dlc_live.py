@@ -74,5 +74,16 @@ DRAW_NAMES = True
 DRAW_CONF = False
 LOG_EVERY_N_FRAMES = 30
 
+# Detailed diagnostics
+LOG_LEVEL = "INFO"  # DEBUG / INFO / WARNING
+LOG_STAGE_TIMINGS = True
+LOG_VISIBLE_BREAKDOWN = True
+LOG_FRAME_SYNC = True
+LOG_DROP_EVENTS = True
+
+# Video pacing / anti-slowdown behavior for file source.
+# If processing is slower than target stream rate, we may drop frames to keep real-time pace.
+MAX_CATCHUP_DROPS_PER_READ = 8
+
 # Reserved for future extension.
 DEVICE = "cuda"
