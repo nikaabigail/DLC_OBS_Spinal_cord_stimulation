@@ -40,7 +40,7 @@ pip install deeplabcut-live[pytorch] --no-deps
 - геометрия инференса: `USE_ROI`, `ROI`, `INFER_W`, `INFER_H`;
 - отрисовка и логирование: `CONF_THRESH_DRAW`, `SHOW_SCALE`, `LOG_EVERY_N_FRAMES`.
 - детальная диагностика: `LOG_STAGE_TIMINGS`, `LOG_VISIBLE_BREAKDOWN`, `LOG_FRAME_SYNC`, `LOG_DROP_EVENTS`.
-- анти-замедление видеофайла: `VIDEO_SKIP_IF_BEHIND` и `MAX_CATCHUP_DROPS_PER_READ`.
+- анти-замедление видеофайла: `VIDEO_SKIP_IF_BEHIND`, `VIDEO_CATCHUP_MODE`, `MAX_CATCHUP_DROPS_PER_READ`.
 
 Поддерживается задание путей через переменные окружения:
 
@@ -58,4 +58,10 @@ pip install deeplabcut-live[pytorch] --no-deps
 Если видео визуально идёт медленнее реального времени, включите:
 
 - `VIDEO_SKIP_IF_BEHIND = True`
-- при необходимости увеличьте `MAX_CATCHUP_DROPS_PER_READ`.
+- начните с `VIDEO_CATCHUP_MODE = "soft"` (рекомендуется)
+- при необходимости увеличьте `MAX_CATCHUP_DROPS_PER_READ`
+
+Если видео стало слишком ускоренным/рывками:
+
+- переключите `VIDEO_CATCHUP_MODE = "off"` или `"soft"`
+- уменьшите `MAX_CATCHUP_DROPS_PER_READ`

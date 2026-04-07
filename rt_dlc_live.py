@@ -103,6 +103,8 @@ class VideoFileSource(FrameSource):
         self.source_fps = 0.0
         self.dropped_total = 0
         self.last_drop_count = 0
+        self.read_count = 0
+        self.reads_since_drop = 0
 
     def open(self) -> None:
         self.cap = cv2.VideoCapture(str(self.video_path))
@@ -120,6 +122,8 @@ class VideoFileSource(FrameSource):
             return False, None
 
         self.frame_id += 1
+        self.read_count += 1
+        self.reads_since_drop += 1
         self.last_drop_count = 0
 
         if self.frame_interval is not None and self.start_perf is not None:
@@ -130,15 +134,31 @@ class VideoFileSource(FrameSource):
             if lag < 0:
                 time.sleep(-lag)
             elif lag > self.frame_interval and self.skip_if_behind:
+                catchup_mode = str(getattr(config, "VIDEO_CATCHUP_MODE", "soft")).lower()
+                trigger_frames = max(1, int(getattr(config, "CATCHUP_LAG_TRIGGER_FRAMES", 3)))
+                cooldown_reads = max(0, int(getattr(config, "CATCHUP_COOLDOWN_READS", 5)))
+                max_drops = max(1, int(getattr(config, "MAX_CATCHUP_DROPS_PER_READ", 2)))
+
                 drops_needed = int(lag / self.frame_interval)
-                max_drops = max(1, int(getattr(config, "MAX_CATCHUP_DROPS_PER_READ", 8)))
-                drops = min(drops_needed, max_drops)
+                if catchup_mode == "off":
+                    drops = 0
+                elif catchup_mode == "aggressive":
+                    drops = min(drops_needed, max_drops)
+                else:
+                    # soft mode: avoid persistent acceleration artifacts.
+                    # Drop at most one frame and only when lag is sustained.
+                    lag_is_large = lag >= (trigger_frames * self.frame_interval)
+                    cooldown_ok = self.reads_since_drop >= cooldown_reads
+                    drops = 1 if (drops_needed >= 1 and lag_is_large and cooldown_ok) else 0
+
                 for _ in range(drops):
                     drop_ok, _ = self.cap.read()
                     if not drop_ok:
                         break
                     self.frame_id += 1
                     self.last_drop_count += 1
+                if self.last_drop_count > 0:
+                    self.reads_since_drop = 0
                 self.dropped_total += self.last_drop_count
 
         return True, FramePacket(self.frame_id, frame, time.time())
@@ -349,11 +369,12 @@ def main() -> None:
     logger.info("Source opened: %s", type(source).__name__)
     if isinstance(source, VideoFileSource):
         logger.info(
-            "Video source fps=%.2f target_fps=%s skip_if_behind=%s max_catchup_drops=%d",
+            "Video source fps=%.2f target_fps=%s skip_if_behind=%s catchup_mode=%s max_catchup_drops=%d",
             source.source_fps,
             str(config.VIDEO_TARGET_FPS),
             str(config.VIDEO_SKIP_IF_BEHIND),
-            int(getattr(config, "MAX_CATCHUP_DROPS_PER_READ", 8)),
+            str(getattr(config, "VIDEO_CATCHUP_MODE", "soft")),
+            int(getattr(config, "MAX_CATCHUP_DROPS_PER_READ", 2)),
         )
 
     predictor = DLCLivePredictor(
@@ -511,9 +532,10 @@ def main() -> None:
                 )
             if isinstance(source, VideoFileSource) and getattr(config, "LOG_DROP_EVENTS", True):
                 logger.info(
-                    "video_pacing source_fps=%.2f target_fps=%s dropped_last=%d dropped_total=%d",
+                    "video_pacing source_fps=%.2f target_fps=%s mode=%s dropped_last=%d dropped_total=%d",
                     source.source_fps,
                     str(config.VIDEO_TARGET_FPS),
+                    str(getattr(config, "VIDEO_CATCHUP_MODE", "soft")),
                     source.last_drop_count,
                     source.dropped_total,
                 )

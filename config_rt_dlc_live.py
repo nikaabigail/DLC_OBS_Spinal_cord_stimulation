@@ -18,6 +18,13 @@ ALT_VIDEO_FILE_PATH = os.getenv(
 
 VIDEO_TARGET_FPS = 90.0
 VIDEO_SKIP_IF_BEHIND = False
+# Catch-up policy for file playback when pipeline is behind:
+# - "off": never drop frames (smooth, can look slow)
+# - "soft": occasional light drops to reduce drift without acceleration artifacts
+# - "aggressive": stronger catch-up (can look accelerated/jumpy)
+VIDEO_CATCHUP_MODE = "soft"
+CATCHUP_LAG_TRIGGER_FRAMES = 3
+CATCHUP_COOLDOWN_READS = 5
 
 FRAME_W = 1920
 FRAME_H = 1080
@@ -83,7 +90,7 @@ LOG_DROP_EVENTS = True
 
 # Video pacing / anti-slowdown behavior for file source.
 # If processing is slower than target stream rate, we may drop frames to keep real-time pace.
-MAX_CATCHUP_DROPS_PER_READ = 8
+MAX_CATCHUP_DROPS_PER_READ = 2
 
 # Reserved for future extension.
 DEVICE = "cuda"
