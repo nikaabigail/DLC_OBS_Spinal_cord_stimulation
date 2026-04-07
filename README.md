@@ -11,7 +11,10 @@
 - `check_dlc_dataset.py` — проверка покрытия размеченного датасета.
 - `check_dlc_shuffles.py` — проверка состояния шaфлов/снапшотов обучения.
 - `rt_dlc_obs.py` — realtime-инференс DLC + оверлей в OpenCV окне.
-- `config_rt_dlc.py` — runtime-конфиг для realtime режима.
+- `config_rt_dlc.py` — runtime-конфиг для realtime режима (`rt_dlc_obs.py`).
+- `rt_dlc_live.py` — альтернативный low-latency runtime через DLCLive.
+- `config_rt_dlc_live.py` — конфиг для `rt_dlc_live.py`.
+- `README_DLC_live.md` — отдельная документация по DLCLive режиму.
 
 ## Быстрый старт
 
@@ -57,11 +60,19 @@ python run_dlc.py labeled
 python run_dlc.py metrics
 ```
 
-### 4) Realtime режим
+### 4) Realtime режим (основной)
 
 ```bash
 python rt_dlc_obs.py
 ```
+
+### 5) Альтернатива: DLCLive runtime
+
+```bash
+python rt_dlc_live.py
+```
+
+Подробности и настройка: `README_DLC_live.md`.
 
 Новый realtime-пайплайн работает **без OBS Virtual Camera**: источник кадров выбирается в `config_rt_dlc.py` через `USE_VIDEO_FILE`:
 - `USE_VIDEO_FILE=False` → `CameraSource`

@@ -1,94 +1,67 @@
-🧠 Real-time DLC Pipeline (Spinal Cord / BCI)
-📌 Overview
+# DLC Live Runtime (альтернативный realtime-пайплайн)
 
-Проект реализует реалтайм-пайплайн оценки позы (pose estimation) для задач:
+`rt_dlc_live.py` — упрощённая альтернатива `rt_dlc_obs.py` для low-latency инференса через `deeplabcut-live`.
 
-gait analysis
-spinal cord stimulation
-closed-loop neurofeedback
-BCI / neuroengineering
-🏗 Архитектура
-Старый пайплайн
-rt_dlc_obs.py
-кастомный inference runner
-сложный admission control
-skip frames
-буферизация
-высокая задержка
-Новый пайплайн (экспериментальный)
-rt_dlc_live.py
-DLCLive backend
-прямой inference
-минимальная задержка
-упрощённая архитектура
-⚙️ Окружения
-🔹 Основное (DLC 3)
-dlc_win_env
-deeplabcut 3.0.0rc13
-torch 2.10.0 + CUDA 12.8
-numpy 1.26.4
-opencv-python
-🔹 DLCLive окружение
-dlc_live_env
-Установленные пакеты:
-pip install "numpy<2"
-pip install opencv-python==4.11.0.86
-pip install deeplabcut-live[pytorch] --no-deps
-pip install colorcet
-📦 Важные зависимости
-пакет	версия
-torch	2.10.0+cu128
-numpy	1.26.x
-opencv-python	4.11.x
-deeplabcut-live	1.1.0
-🧠 Модель
+## Что это даёт
 
-Путь:
+- меньше задержка (без очередей и сложного throttle-пайплайна),
+- проще отладка (один цикл capture → infer → draw),
+- отдельный конфиг (`config_rt_dlc_live.py`), не мешает основному realtime-скрипту.
 
-C:\dlc\project\r_tm_side-og-2024-10-25\exported-models-pytorch\
+## Как запускать
 
-Используется:
-
-*.pt snapshot (best)
-▶️ Запуск
+```bash
 conda activate dlc_live_env
-
 python rt_dlc_live.py
-📊 Текущие метрики
-inference time: ~20 ms
-dlc fps: 25–50
-latency: минимальная
-visible: ⚠ ~20% (нужно исправить)
-⚠️ Известные проблемы
-1. Низкая точность (visible)
+```
 
-Причины:
+## Зависимости окружения
 
-несовпадение bodyparts
-порог confidence
-отсутствие фильтрации
-2. Нет фильтрации
+Минимум:
 
-В текущей версии отсутствуют:
+- `numpy<2`
+- `opencv-python`
+- `deeplabcut-live[pytorch]`
+- `colorcet`
 
-median filter
-despike
-hold
-3. Нет ROI
+Пример установки:
 
-Используется full-frame inference
+```bash
+pip install "numpy<2" opencv-python==4.11.0.86 colorcet
+pip install deeplabcut-live[pytorch] --no-deps
+```
 
-🚧 Roadmap
- debug output DLCLive
- восстановить фильтрацию
- сравнить с baseline (rt_dlc_obs)
- добавить causal smoothing
- интеграция с BCI pipeline
-🧪 Использование
+## Настройка
 
-Подходит для:
+Основные параметры находятся в `config_rt_dlc_live.py`:
 
-real-time gait detection
-neuroscience experiments
-closed-loop stimulation
-pose-based control systems
+- источник кадров: `USE_VIDEO_FILE`, `VIDEO_FILE_PATH`, `CAM_INDEX`;
+- модель: `MODEL_PATH`, `MODEL_TYPE`, `BODY_PARTS`;
+- геометрия инференса: `USE_ROI`, `ROI`, `INFER_W`, `INFER_H`;
+- отрисовка и логирование: `CONF_THRESH_DRAW`, `SHOW_SCALE`, `LOG_EVERY_N_FRAMES`.
+- детальная диагностика: `LOG_STAGE_TIMINGS`, `LOG_VISIBLE_BREAKDOWN`, `LOG_FRAME_SYNC`, `LOG_DROP_EVENTS`.
+- анти-замедление видеофайла: `VIDEO_SKIP_IF_BEHIND`, `VIDEO_CATCHUP_MODE`, `MAX_CATCHUP_DROPS_PER_READ`.
+
+Поддерживается задание путей через переменные окружения:
+
+- `DLC_LIVE_VIDEO_PATH`
+- `DLC_LIVE_ALT_VIDEO_PATH`
+- `DLC_LIVE_MODEL_PATH`
+
+Это позволяет не коммитить локальные machine-specific пути в Git.
+
+## Текущее ограничение
+
+Скрипт intentionally минималистичный: без online-фильтрации (median/despike/hold) из `rt_dlc_obs.py`.
+Если нужна максимальная стабильность точек, используйте `rt_dlc_obs.py`.
+
+Если видео визуально идёт медленнее реального времени, включите:
+
+- `VIDEO_SKIP_IF_BEHIND = True`
+- начните с `VIDEO_CATCHUP_MODE = "soft"` (рекомендуется)
+- при необходимости увеличьте `MAX_CATCHUP_DROPS_PER_READ`
+
+Если видео стало слишком ускоренным/рывками:
+
+- переключите `VIDEO_CATCHUP_MODE = "off"` или `"soft"`
+- уменьшите `MAX_CATCHUP_DROPS_PER_READ`
