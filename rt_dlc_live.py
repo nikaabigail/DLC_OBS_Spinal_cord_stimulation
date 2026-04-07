@@ -22,7 +22,9 @@ def setup_logger() -> logging.Logger:
     if logger.handlers:
         return logger
 
-    logger.setLevel(logging.INFO)
+    level_name = str(getattr(config, "LOG_LEVEL", "INFO")).upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logger.setLevel(level)
     fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
 
     sh = logging.StreamHandler()
@@ -98,12 +100,16 @@ class VideoFileSource(FrameSource):
         self.frame_id = 0
         self.start_perf: float | None = None
         self.frame_interval = (1.0 / target_fps) if target_fps and target_fps > 0 else None
+        self.source_fps = 0.0
+        self.dropped_total = 0
+        self.last_drop_count = 0
 
     def open(self) -> None:
         self.cap = cv2.VideoCapture(str(self.video_path))
         if not self.cap.isOpened():
             raise RuntimeError(f"Cannot open video file: {self.video_path}")
         self.start_perf = time.perf_counter()
+        self.source_fps = float(self.cap.get(cv2.CAP_PROP_FPS) or 0.0)
 
     def read(self) -> tuple[bool, Optional[FramePacket]]:
         if self.cap is None:
@@ -114,6 +120,7 @@ class VideoFileSource(FrameSource):
             return False, None
 
         self.frame_id += 1
+        self.last_drop_count = 0
 
         if self.frame_interval is not None and self.start_perf is not None:
             expected_elapsed = self.frame_id * self.frame_interval
@@ -123,8 +130,16 @@ class VideoFileSource(FrameSource):
             if lag < 0:
                 time.sleep(-lag)
             elif lag > self.frame_interval and self.skip_if_behind:
-                # drop one extra frame to catch up
-                _ = self.cap.read()
+                drops_needed = int(lag / self.frame_interval)
+                max_drops = max(1, int(getattr(config, "MAX_CATCHUP_DROPS_PER_READ", 8)))
+                drops = min(drops_needed, max_drops)
+                for _ in range(drops):
+                    drop_ok, _ = self.cap.read()
+                    if not drop_ok:
+                        break
+                    self.frame_id += 1
+                    self.last_drop_count += 1
+                self.dropped_total += self.last_drop_count
 
         return True, FramePacket(self.frame_id, frame, time.time())
 
@@ -332,6 +347,14 @@ def main() -> None:
     source = build_frame_source()
     source.open()
     logger.info("Source opened: %s", type(source).__name__)
+    if isinstance(source, VideoFileSource):
+        logger.info(
+            "Video source fps=%.2f target_fps=%s skip_if_behind=%s max_catchup_drops=%d",
+            source.source_fps,
+            str(config.VIDEO_TARGET_FPS),
+            str(config.VIDEO_SKIP_IF_BEHIND),
+            int(getattr(config, "MAX_CATCHUP_DROPS_PER_READ", 8)),
+        )
 
     predictor = DLCLivePredictor(
         model_path=config.MODEL_PATH,
@@ -346,16 +369,22 @@ def main() -> None:
 
     total_visible = 0
     total_points = 0
+    total_drawn = 0
+    loop_count = 0
+    total_frame_drops = 0
+    prev_loop_ts: Optional[float] = None
 
     while True:
         ret, packet = source.read()
         if not ret or packet is None:
             logger.info("Source ended.")
             break
+        loop_count += 1
 
         frame = packet.frame
         frame_id = packet.frame_id
         capture_ts = packet.capture_ts
+        loop_start = time.perf_counter()
 
         if prev_cam_ts is not None:
             dt = capture_ts - prev_cam_ts
@@ -364,7 +393,9 @@ def main() -> None:
         prev_cam_ts = capture_ts
 
         roi_frame, roi_offset = resolve_roi(frame)
+        t_pre0 = time.perf_counter()
         infer_frame = resize_for_infer(roi_frame)
+        t_pre1 = time.perf_counter()
 
         t0 = time.perf_counter()
         points_infer = predictor.predict_frame(infer_frame)
@@ -392,16 +423,23 @@ def main() -> None:
             display = infer_frame.copy()
 
         visible_now = 0
+        drawn_now = 0
         for p in draw_points.values():
             l = p["likelihood"]
-            if p["x"] is not None and p["y"] is not None and l is not None and l >= config.CONF_THRESH_DRAW:
+            if p["x"] is not None and p["y"] is not None and l is not None:
                 visible_now += 1
+                if l >= config.CONF_THRESH_DRAW:
+                    drawn_now += 1
 
         total_visible += visible_now
         total_points += len(draw_points)
+        total_drawn += drawn_now
 
+        t_draw0 = time.perf_counter()
         display = draw_overlay(display, draw_points, fps_cam, fps_dlc)
+        t_draw1 = time.perf_counter()
 
+        t_disp0 = time.perf_counter()
         if config.SHOW_SCALE != 1.0:
             display = cv2.resize(
                 display,
@@ -413,17 +451,72 @@ def main() -> None:
 
         cv2.imshow(config.WINDOW_NAME, display)
         key = cv2.waitKey(1) & 0xFF
+        t_disp1 = time.perf_counter()
+
+        loop_end = time.perf_counter()
+        loop_ms = (loop_end - loop_start) * 1000.0
+        pre_ms = (t_pre1 - t_pre0) * 1000.0
+        draw_ms = (t_draw1 - t_draw0) * 1000.0
+        disp_ms = (t_disp1 - t_disp0) * 1000.0
+        loop_fps = 0.0
+        now_ts = time.time()
+        if prev_loop_ts is not None:
+            dloop = now_ts - prev_loop_ts
+            if dloop > 0:
+                loop_fps = 1.0 / dloop
+        prev_loop_ts = now_ts
+
+        if isinstance(source, VideoFileSource):
+            total_frame_drops = source.dropped_total
 
         if frame_id % max(1, config.LOG_EVERY_N_FRAMES) == 0:
             visible_pct = 100.0 * total_visible / max(1, total_points)
+            drawn_pct = 100.0 * total_drawn / max(1, total_points)
             logger.info(
-                "frame_id=%d cam_fps=%.1f dlc_fps=%.1f infer_time=%.2fms visible=%.1f%%",
+                "frame_id=%d cam_fps=%.1f loop_fps=%.1f dlc_fps=%.1f infer_time=%.2fms visible=%.1f%% drawn=%.1f%% drops_total=%d",
                 frame_id,
                 fps_cam,
+                loop_fps,
                 fps_dlc,
                 infer_time_ms,
                 visible_pct,
+                drawn_pct,
+                total_frame_drops,
             )
+            if getattr(config, "LOG_STAGE_TIMINGS", True):
+                logger.info(
+                    "timings_ms pre=%.2f infer=%.2f draw=%.2f display=%.2f loop=%.2f",
+                    pre_ms,
+                    infer_time_ms,
+                    draw_ms,
+                    disp_ms,
+                    loop_ms,
+                )
+            if getattr(config, "LOG_VISIBLE_BREAKDOWN", True):
+                logger.info(
+                    "points frame_total=%d visible_now=%d drawn_now=%d conf_thresh=%.2f",
+                    len(draw_points),
+                    visible_now,
+                    drawn_now,
+                    config.CONF_THRESH_DRAW,
+                )
+            if getattr(config, "LOG_FRAME_SYNC", True):
+                pred_age_ms = (time.time() - capture_ts) * 1000.0
+                logger.info(
+                    "sync frame_id=%d pred_age_ms=%.2f roi=%s infer_shape=%s",
+                    frame_id,
+                    pred_age_ms,
+                    str(config.ROI if config.USE_ROI else None),
+                    f"{infer_frame.shape[1]}x{infer_frame.shape[0]}",
+                )
+            if isinstance(source, VideoFileSource) and getattr(config, "LOG_DROP_EVENTS", True):
+                logger.info(
+                    "video_pacing source_fps=%.2f target_fps=%s dropped_last=%d dropped_total=%d",
+                    source.source_fps,
+                    str(config.VIDEO_TARGET_FPS),
+                    source.last_drop_count,
+                    source.dropped_total,
+                )
 
         if key in (27, ord("q")):
             logger.info("Exit requested by user.")
