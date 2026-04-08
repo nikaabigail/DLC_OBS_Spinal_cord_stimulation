@@ -25,6 +25,17 @@ FRAME_W = 1920
 FRAME_H = 1080  
 TARGET_VIDEO_FPS = 100.0
 SHOW_SCALE = 0.8
+
+# Режим выполнения:
+# - "visual": как сейчас, показываем окно cv2.imshow
+# - "background": не показываем окно, обрабатываем поток в фоне
+RUNTIME_MODE = "visual"
+
+# Сохранение результирующего видео (с overlay)
+SAVE_OUTPUT_VIDEO = True
+OUTPUT_VIDEO_PATH = Path(r"C:\dlc\DLC_OBS_Spinal_cord_stimulation\rt_dlc_output.mp4")
+OUTPUT_VIDEO_FPS = 0.0  # 0.0 -> брать FPS из источника (VIDEO_TARGET_FPS)
+OUTPUT_VIDEO_CODEC = "mp4v"
 # Для стабильной онлайн-оценки угла лучше не ждать движения:
 # стартуем инференс сразу, иначе первые полезные кадры теряются.
 AUTO_START_ON_MOTION = False
