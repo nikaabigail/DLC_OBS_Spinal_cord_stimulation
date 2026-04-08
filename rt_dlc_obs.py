@@ -705,18 +705,20 @@ def main() -> None:
     csv_header_written = False
     visual_mode = is_visual_mode()
     save_output_video = bool(getattr(config, "SAVE_OUTPUT_VIDEO", False))
+    background_disable_stale_drop = bool(getattr(config, "BACKGROUND_DISABLE_STALE_DROP", True))
     output_video_path = Path(getattr(config, "OUTPUT_VIDEO_PATH", "output_with_overlay.mp4"))
     output_video_fps = float(getattr(config, "OUTPUT_VIDEO_FPS", 0.0))
     video_writer: cv2.VideoWriter | None = None
 
     logger.info(
-        "Pipeline started. source=%s roi=%s infer_size=(%s,%s) mode=%s save_video=%s",
+        "Pipeline started. source=%s roi=%s infer_size=(%s,%s) mode=%s save_video=%s bg_disable_stale_drop=%s",
         type(source).__name__,
         config.ROI if config.USE_ROI else "full",
         config.INFER_W,
         config.INFER_H,
         "visual" if visual_mode else "background",
         save_output_video,
+        background_disable_stale_drop,
     )
 
     worker = Thread(
@@ -883,10 +885,12 @@ def main() -> None:
                 map_infer_shape = (infer_frame.shape[0], infer_frame.shape[1])
                 map_roi_offset = roi_offset
 
+            allow_stale_in_background = (not visual_mode) and background_disable_stale_drop
             stale_drop = (
                 pred_age_ms >= 0
                 and getattr(config, "STALE_PRED_POLICY", "show") == "drop"
                 and pred_age_ms > float(getattr(config, "STALE_PRED_MAX_MS", 0.0))
+                and not allow_stale_in_background
             )
             if stale_drop:
                 processed_points = {p: {"x": None, "y": None, "likelihood": None} for p in config.USE_POINTS}
