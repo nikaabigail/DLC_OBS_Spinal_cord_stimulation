@@ -332,6 +332,12 @@ def validate_runtime_config() -> None:
             "to avoid conflicting gating states."
         )
 
+    runtime_mode = str(getattr(config, "RUNTIME_MODE", "visual")).strip().lower()
+    if runtime_mode not in {"visual", "background"}:
+        raise ValueError("RUNTIME_MODE must be either 'visual' or 'background'.")
+    if bool(getattr(config, "SAVE_OUTPUT_VIDEO", False)) and not getattr(config, "OUTPUT_VIDEO_PATH", None):
+        raise ValueError("OUTPUT_VIDEO_PATH must be set when SAVE_OUTPUT_VIDEO=True.")
+
     src_fps = float(getattr(config, "VIDEO_TARGET_FPS", 0.0) if getattr(config, "USE_VIDEO_FILE", False) else getattr(config, "TARGET_VIDEO_FPS", 0.0))
     if src_fps > 0:
         physical_cap = src_fps / max(1, int(getattr(config, "INFER_EVERY_N_FRAMES", 1)))
@@ -651,9 +657,17 @@ def draw_overlay(
             y0 += 25
             cv2.putText(out, f"CAM FPS: {fps_cam:.1f} | DLC FPS: {fps_dlc:.1f} | SKIP RATE: {skip_rate:.1f}%", (10, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-    if config.DRAW_HIND_ANGLE and hind_angle is not None:
+    # Угол всегда рисуем, если он вычислен: это нужно, чтобы запись совпадала с online-наблюдением.
+    if hind_angle is not None:
         cv2.putText(out, f"Hind angle: {hind_angle:.1f}", (10, y0 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
     return out
+
+def is_visual_mode() -> bool:
+    runtime_mode = str(getattr(config, "RUNTIME_MODE", "visual")).strip().lower()
+    if runtime_mode not in {"visual", "background"}:
+        raise ValueError("RUNTIME_MODE must be either 'visual' or 'background'.")
+    return runtime_mode == "visual"
+
 
 def main() -> None:
     validate_runtime_config()
@@ -690,8 +704,23 @@ def main() -> None:
     stop_event = Event()
 
     csv_header_written = False
+    visual_mode = is_visual_mode()
+    save_output_video = bool(getattr(config, "SAVE_OUTPUT_VIDEO", False))
+    background_disable_stale_drop = bool(getattr(config, "BACKGROUND_DISABLE_STALE_DROP", True))
+    output_video_path = Path(getattr(config, "OUTPUT_VIDEO_PATH", "output_with_overlay.mp4"))
+    output_video_fps = float(getattr(config, "OUTPUT_VIDEO_FPS", 0.0))
+    video_writer: cv2.VideoWriter | None = None
 
-    logger.info("Pipeline started. source=%s roi=%s infer_size=(%s,%s)", type(source).__name__, config.ROI if config.USE_ROI else "full", config.INFER_W, config.INFER_H)
+    logger.info(
+        "Pipeline started. source=%s roi=%s infer_size=(%s,%s) mode=%s save_video=%s bg_disable_stale_drop=%s",
+        type(source).__name__,
+        config.ROI if config.USE_ROI else "full",
+        config.INFER_W,
+        config.INFER_H,
+        "visual" if visual_mode else "background",
+        save_output_video,
+        background_disable_stale_drop,
+    )
 
     worker = Thread(
         target=inference_worker,
@@ -857,10 +886,12 @@ def main() -> None:
                 map_infer_shape = (infer_frame.shape[0], infer_frame.shape[1])
                 map_roi_offset = roi_offset
 
+            allow_stale_in_background = (not visual_mode) and background_disable_stale_drop
             stale_drop = (
                 pred_age_ms >= 0
                 and getattr(config, "STALE_PRED_POLICY", "show") == "drop"
                 and pred_age_ms > float(getattr(config, "STALE_PRED_MAX_MS", 0.0))
+                and not allow_stale_in_background
             )
             if stale_drop:
                 processed_points = {p: {"x": None, "y": None, "likelihood": None} for p in config.USE_POINTS}
@@ -942,8 +973,22 @@ def main() -> None:
             t_disp0 = time.perf_counter()
             if config.SHOW_SCALE != 1.0:
                 display = cv2.resize(display, None, fx=config.SHOW_SCALE, fy=config.SHOW_SCALE, interpolation=cv2.INTER_AREA)
-            cv2.imshow(config.WINDOW_NAME, display)
-            key = cv2.waitKey(1) & 0xFF
+
+            if save_output_video:
+                if video_writer is None:
+                    output_video_path.parent.mkdir(parents=True, exist_ok=True)
+                    out_h, out_w = display.shape[:2]
+                    fps_for_writer = output_video_fps if output_video_fps > 0 else float(getattr(config, "VIDEO_TARGET_FPS", 30.0))
+                    fourcc = cv2.VideoWriter_fourcc(*str(getattr(config, "OUTPUT_VIDEO_CODEC", "mp4v")))
+                    video_writer = cv2.VideoWriter(str(output_video_path), fourcc, fps_for_writer, (out_w, out_h))
+                    if not video_writer.isOpened():
+                        raise RuntimeError(f"Cannot open output video for writing: {output_video_path}")
+                video_writer.write(display)
+
+            key = -1
+            if visual_mode:
+                cv2.imshow(config.WINDOW_NAME, display)
+                key = cv2.waitKey(1) & 0xFF
             display_ts = time.time()
             t_disp1 = time.perf_counter()
             stats["t_display_ms"] += (t_disp1 - t_disp0) * 1000.0
@@ -1077,6 +1122,8 @@ def main() -> None:
         stop_event.set()
         worker.join(timeout=1.0)
         source.release()
+        if 'video_writer' in locals() and video_writer is not None:
+            video_writer.release()
         cv2.destroyAllWindows()
 
 
