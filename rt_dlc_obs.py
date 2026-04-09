@@ -657,7 +657,8 @@ def draw_overlay(
             y0 += 25
             cv2.putText(out, f"CAM FPS: {fps_cam:.1f} | DLC FPS: {fps_dlc:.1f} | SKIP RATE: {skip_rate:.1f}%", (10, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-    if config.DRAW_HIND_ANGLE and hind_angle is not None:
+    # Угол всегда рисуем, если он вычислен: это нужно, чтобы запись совпадала с online-наблюдением.
+    if hind_angle is not None:
         cv2.putText(out, f"Hind angle: {hind_angle:.1f}", (10, y0 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
     return out
 
