@@ -14,6 +14,7 @@
 - `config_rt_dlc.py` — runtime-конфиг для realtime режима (`rt_dlc_obs.py`).
 - `rt_dlc_live.py` — альтернативный low-latency runtime через DLCLive.
 - `config_rt_dlc_live.py` — конфиг для `rt_dlc_live.py`.
+- `rt_dlc_config_gui.py` — графический runtime-конфигуратор (замена ручного редактирования `config_rt_dlc.py`) с валидацией и учетом зависимостей.
 - `check_online_buffering.py` — утилита для многократной проверки/диагностики буферизации (симуляция + сводка benchmark CSV).
 - `README_DLC_live.md` — отдельная документация по DLCLive режиму.
 
@@ -66,6 +67,17 @@ python run_dlc.py metrics
 ```bash
 python rt_dlc_obs.py
 ```
+
+### 4.1) GUI-настройка runtime + запуск
+
+```bash
+python rt_dlc_config_gui.py
+```
+
+В GUI:
+- меняются значения параметров из `config_rt_dlc.py`,
+- автоматически считается производный cap (например, по `source_fps / INFER_EVERY_N_FRAMES`),
+- при `Start` применяются значения, выполняется валидация, окно закрывается и стартует `rt_dlc_obs`.
 
 ### 5) Альтернатива: DLCLive runtime
 
