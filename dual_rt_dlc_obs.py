@@ -349,6 +349,7 @@ def main() -> None:
                     fps_dlc=rt.fps_dlc,
                     skip_rate=(rt.skip_busy_overwrite / max(1, rt.submit_attempts)) * 100.0,
                     hind_angle=hind_angle,
+                    buffer_status_text=None,
                     processing_active=True,
                     motion_score=0.0,
                 )
