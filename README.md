@@ -14,6 +14,7 @@
 - `config_rt_dlc.py` — runtime-конфиг для realtime режима (`rt_dlc_obs.py`).
 - `rt_dlc_live.py` — альтернативный low-latency runtime через DLCLive.
 - `config_rt_dlc_live.py` — конфиг для `rt_dlc_live.py`.
+- `check_online_buffering.py` — утилита для многократной проверки/диагностики буферизации (симуляция + сводка benchmark CSV).
 - `README_DLC_live.md` — отдельная документация по DLCLive режиму.
 
 ## Быстрый старт
@@ -74,6 +75,13 @@ python rt_dlc_live.py
 
 Подробности и настройка: `README_DLC_live.md`.
 
+### 6) Проверка буферизации (многократно)
+
+```bash
+python check_online_buffering.py simulate --buffers 0 20 40 80 120 --repeats 10
+python check_online_buffering.py summarize-csv --csv C:\\dlc\\DLC_OBS_Spinal_cord_stimulation\\rt_dlc_benchmark.csv
+```
+
 Новый realtime-пайплайн работает **без OBS Virtual Camera**: источник кадров выбирается в `config_rt_dlc.py` через `USE_VIDEO_FILE`:
 - `USE_VIDEO_FILE=False` → `CameraSource`
 - `USE_VIDEO_FILE=True` → `VideoFileSource` (с pacing по `VIDEO_TARGET_FPS`)
@@ -99,6 +107,7 @@ python rt_dlc_live.py
 - `raw_visible` vs `filtered_visible`,
 - skip-счетчики по причинам (`skip_duplicate`, `skip_motion`, `skip_n`, `skip_fps`),
 - тайминги стадий (`t_capture`, `t_pre`, `t_infer`, `t_post`, `t_draw`, `t_disp`).
+- отдельная строка `buffer_diag` с контролем буферизации: `target`, `actual_mean`, `err_mean`, `abs_err_mean`, `%on_target`, `%exact_match`, `%no_pred`, `%stale_drop`, а также длины `infer_q/frame_buf/pred_buf`.
 
 ## Что проверено и отполировано
 
