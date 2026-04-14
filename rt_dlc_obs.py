@@ -99,12 +99,16 @@ class VideoFileSource(FrameSource):
         self.frame_id = 0
         self.start_ts: float | None = None
         self.frame_interval = (1.0 / target_fps) if target_fps and target_fps > 0 else None
+        self.source_fps = 0.0
+        self.dropped_total = 0
+        self.last_drop_count = 0
 
     def open(self) -> None:
         self.cap = cv2.VideoCapture(str(self.video_path))
         if not self.cap.isOpened():
             raise RuntimeError(f"Cannot open video file: {self.video_path}")
         self.start_ts = time.perf_counter()
+        self.source_fps = float(self.cap.get(cv2.CAP_PROP_FPS) or 0.0)
 
     def read(self) -> tuple[bool, Optional[FramePacket]]:
         if self.cap is None:
@@ -115,6 +119,7 @@ class VideoFileSource(FrameSource):
             return False, None
 
         self.frame_id += 1
+        self.last_drop_count = 0
 
         if self.frame_interval is not None and self.start_ts is not None:
             expected_elapsed = self.frame_id * self.frame_interval
@@ -125,7 +130,11 @@ class VideoFileSource(FrameSource):
                 time.sleep(-lag)
             elif lag > self.frame_interval and self.skip_if_behind:
                 # drop one stale frame to catch up
-                _ = self.cap.read()
+                drop_ok, _ = self.cap.read()
+                if drop_ok:
+                    self.frame_id += 1
+                    self.last_drop_count = 1
+                    self.dropped_total += 1
 
         return True, FramePacket(frame_id=self.frame_id, frame=frame, capture_ts=time.time())
 
@@ -354,6 +363,17 @@ def validate_runtime_config() -> None:
         raise ValueError("STALE_PRED_MAX_MS must be >= 0.")
     if float(getattr(config, "OVERLAY_HOLD_MS", 0.0)) < 0:
         raise ValueError("OVERLAY_HOLD_MS must be >= 0.")
+
+
+def estimate_frame_buffer_capacity_ms() -> float:
+    source_fps = float(
+        getattr(config, "VIDEO_TARGET_FPS", 0.0)
+        if getattr(config, "USE_VIDEO_FILE", False)
+        else getattr(config, "TARGET_VIDEO_FPS", 0.0)
+    )
+    if source_fps <= 0:
+        return 0.0
+    return (float(getattr(config, "MAX_FRAME_BUFFER", 1)) / source_fps) * 1000.0
 
 
 def setup_logger() -> logging.Logger:
@@ -631,6 +651,7 @@ def draw_overlay(
     fps_dlc: float,
     skip_rate: float,
     hind_angle: Optional[float],
+    buffer_status_text: Optional[str],
     processing_active: bool,
     motion_score: float,
 ) -> np.ndarray:
@@ -660,6 +681,8 @@ def draw_overlay(
     # Угол всегда рисуем, если он вычислен: это нужно, чтобы запись совпадала с online-наблюдением.
     if hind_angle is not None:
         cv2.putText(out, f"Hind angle: {hind_angle:.1f}", (10, y0 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+    if buffer_status_text:
+        cv2.putText(out, buffer_status_text, (10, y0 + 50), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 220, 255), 2)
     return out
 
 def is_visual_mode() -> bool:
@@ -720,6 +743,42 @@ def main() -> None:
         "visual" if visual_mode else "background",
         save_output_video,
         background_disable_stale_drop,
+    )
+    requested_buffer_ms = float(getattr(config, "DISPLAY_BUFFER_MS", 0.0))
+    frame_buffer_capacity_ms = estimate_frame_buffer_capacity_ms()
+    logger.info(
+        "Display buffering requested=%.1fms, estimated_frame_buffer_capacity=%.1fms (MAX_FRAME_BUFFER=%d)",
+        requested_buffer_ms,
+        frame_buffer_capacity_ms,
+        int(getattr(config, "MAX_FRAME_BUFFER", 0)),
+    )
+    if frame_buffer_capacity_ms > 0 and requested_buffer_ms > frame_buffer_capacity_ms:
+        logger.warning(
+            "DISPLAY_BUFFER_MS=%.1f exceeds estimated capacity %.1fms. "
+            "Increase MAX_FRAME_BUFFER or reduce source FPS for visible buffering effect.",
+            requested_buffer_ms,
+            frame_buffer_capacity_ms,
+        )
+    source_nominal_fps = float(
+        getattr(config, "VIDEO_TARGET_FPS", 0.0)
+        if getattr(config, "USE_VIDEO_FILE", False)
+        else getattr(config, "TARGET_VIDEO_FPS", 0.0)
+    )
+    buffer_tolerance_ms = (
+        max(8.0, 1000.0 / source_nominal_fps)
+        if source_nominal_fps > 0
+        else 16.0
+    )
+    buffer_diag = defaultdict(float)
+    buffer_diag_every_n = max(1, int(getattr(config, "BUFFER_DIAG_EVERY_N_FRAMES", 1)))
+    buffer_diag_warn_min_samples = max(10.0, float(getattr(config, "BUFFER_DIAG_WARN_MIN_SAMPLES", config.LOG_EVERY_N_FRAMES)))
+    buffer_diag_reset_after_log = bool(getattr(config, "BUFFER_DIAG_RESET_AFTER_LOG", False))
+    logger.info(
+        "Buffer diag enabled: every_n=%d warn_min_samples=%.0f reset_after_log=%s tolerance=±%.1fms",
+        buffer_diag_every_n,
+        buffer_diag_warn_min_samples,
+        buffer_diag_reset_after_log,
+        buffer_tolerance_ms,
     )
 
     worker = Thread(
@@ -903,6 +962,28 @@ def main() -> None:
             display_frame_id = display_packet.frame_id
             frame_delta = display_frame_id - pred_frame_id if pred_frame_id >= 0 else -1
             display_buffer_ms_actual = (display_ts - display_packet.capture_ts) * 1000.0
+            display_buffer_err_ms = display_buffer_ms_actual - requested_buffer_ms
+            buffer_on_target_now = abs(display_buffer_err_ms) <= buffer_tolerance_ms
+            buffer_diag["samples"] += 1
+            buffer_diag["sum_actual_ms"] += display_buffer_ms_actual
+            buffer_diag["sum_err_ms"] += display_buffer_err_ms
+            buffer_diag["sum_abs_err_ms"] += abs(display_buffer_err_ms)
+            if abs(display_buffer_err_ms) <= buffer_tolerance_ms:
+                buffer_diag["on_target"] += 1
+            if exact_match:
+                buffer_diag["exact_match"] += 1
+            if matched_pred is None:
+                buffer_diag["no_pred"] += 1
+            if stale_drop:
+                buffer_diag["stale_drop"] += 1
+            if frame_delta >= 0:
+                stats["frame_delta_sum"] += frame_delta
+                stats["frame_delta_count"] += 1
+            buffer_status_text = (
+                f"BUF {display_buffer_ms_actual:.1f}/{requested_buffer_ms:.1f}ms "
+                f"{'OK' if buffer_on_target_now else 'BAD'} "
+                f"delta_f={frame_delta}"
+            )
 
             # compute feature
             hind_angle = None
@@ -964,6 +1045,7 @@ def main() -> None:
                 fps_dlc,
                 skip_rate,
                 hind_angle,
+                buffer_status_text,
                 processing_active,
                 motion_score,
             )
@@ -1035,6 +1117,41 @@ def main() -> None:
                 )
             prev_triplet_state = has_triplet
 
+            if frame_id % buffer_diag_every_n == 0:
+                diag_n = max(1.0, buffer_diag["samples"])
+                logger.info(
+                    "buffer_diag frame_id=%d target=%.1fms actual_mean=%.1fms err_mean=%.1fms abs_err_mean=%.1fms "
+                    "on_target=%.1f%% tol=±%.1fms exact_match=%.1f%% no_pred=%.1f%% stale_drop=%.1f%% "
+                    "frame_delta_last=%d frame_delta_mean=%.2f infer_q=%d frame_buf_len=%d pred_buf_len=%d",
+                    frame_id,
+                    requested_buffer_ms,
+                    buffer_diag["sum_actual_ms"] / diag_n,
+                    buffer_diag["sum_err_ms"] / diag_n,
+                    buffer_diag["sum_abs_err_ms"] / diag_n,
+                    100.0 * (buffer_diag["on_target"] / diag_n),
+                    buffer_tolerance_ms,
+                    100.0 * (buffer_diag["exact_match"] / diag_n),
+                    100.0 * (buffer_diag["no_pred"] / diag_n),
+                    100.0 * (buffer_diag["stale_drop"] / diag_n),
+                    frame_delta,
+                    (stats.get("frame_delta_sum", 0.0) / max(1.0, stats.get("frame_delta_count", 1.0))),
+                    infer_queue.qsize(),
+                    len(frame_buffer),
+                    len(preds_snapshot),
+                )
+                if buffer_diag["samples"] >= buffer_diag_warn_min_samples and (
+                    (buffer_diag["on_target"] / diag_n) < 0.3
+                ):
+                    logger.warning(
+                        "buffer_diag low on-target ratio: %.1f%% (target %.1fms, tol ±%.1fms). "
+                        "Likely bottleneck: frame buffer capacity, source jitter, or inference lag.",
+                        100.0 * (buffer_diag["on_target"] / diag_n),
+                        requested_buffer_ms,
+                        buffer_tolerance_ms,
+                    )
+                if buffer_diag_reset_after_log:
+                    buffer_diag.clear()
+
             if frame_id % max(1, config.LOG_EVERY_N_FRAMES) == 0:
                 raw_vis = stats["raw_visible"] / max(1.0, stats["total_points"]) * 100.0
                 filt_vis = stats["filtered_visible"] / max(1.0, stats["total_points"]) * 100.0
@@ -1083,7 +1200,6 @@ def main() -> None:
                     display_ts,
                     bp_txt,
                 )
-
                 if getattr(config, "ENABLE_BENCHMARK_LOG_ROW", False):
                     path = Path(config.BENCHMARK_CSV_PATH)
                     with open(path, "a", newline="", encoding="utf-8") as f:
