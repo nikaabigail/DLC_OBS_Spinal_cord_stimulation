@@ -767,6 +767,16 @@ def main() -> None:
         else 16.0
     )
     buffer_diag = defaultdict(float)
+    buffer_diag_every_n = max(1, int(getattr(config, "BUFFER_DIAG_EVERY_N_FRAMES", 1)))
+    buffer_diag_warn_min_samples = max(10.0, float(getattr(config, "BUFFER_DIAG_WARN_MIN_SAMPLES", config.LOG_EVERY_N_FRAMES)))
+    buffer_diag_reset_after_log = bool(getattr(config, "BUFFER_DIAG_RESET_AFTER_LOG", False))
+    logger.info(
+        "Buffer diag enabled: every_n=%d warn_min_samples=%.0f reset_after_log=%s tolerance=±%.1fms",
+        buffer_diag_every_n,
+        buffer_diag_warn_min_samples,
+        buffer_diag_reset_after_log,
+        buffer_tolerance_ms,
+    )
 
     worker = Thread(
         target=inference_worker,
@@ -1097,6 +1107,41 @@ def main() -> None:
                 )
             prev_triplet_state = has_triplet
 
+            if frame_id % buffer_diag_every_n == 0:
+                diag_n = max(1.0, buffer_diag["samples"])
+                logger.info(
+                    "buffer_diag frame_id=%d target=%.1fms actual_mean=%.1fms err_mean=%.1fms abs_err_mean=%.1fms "
+                    "on_target=%.1f%% tol=±%.1fms exact_match=%.1f%% no_pred=%.1f%% stale_drop=%.1f%% "
+                    "frame_delta_last=%d frame_delta_mean=%.2f infer_q=%d frame_buf_len=%d pred_buf_len=%d",
+                    frame_id,
+                    requested_buffer_ms,
+                    buffer_diag["sum_actual_ms"] / diag_n,
+                    buffer_diag["sum_err_ms"] / diag_n,
+                    buffer_diag["sum_abs_err_ms"] / diag_n,
+                    100.0 * (buffer_diag["on_target"] / diag_n),
+                    buffer_tolerance_ms,
+                    100.0 * (buffer_diag["exact_match"] / diag_n),
+                    100.0 * (buffer_diag["no_pred"] / diag_n),
+                    100.0 * (buffer_diag["stale_drop"] / diag_n),
+                    frame_delta,
+                    (stats.get("frame_delta_sum", 0.0) / max(1.0, stats.get("frame_delta_count", 1.0))),
+                    infer_queue.qsize(),
+                    len(frame_buffer),
+                    len(preds_snapshot),
+                )
+                if buffer_diag["samples"] >= buffer_diag_warn_min_samples and (
+                    (buffer_diag["on_target"] / diag_n) < 0.3
+                ):
+                    logger.warning(
+                        "buffer_diag low on-target ratio: %.1f%% (target %.1fms, tol ±%.1fms). "
+                        "Likely bottleneck: frame buffer capacity, source jitter, or inference lag.",
+                        100.0 * (buffer_diag["on_target"] / diag_n),
+                        requested_buffer_ms,
+                        buffer_tolerance_ms,
+                    )
+                if buffer_diag_reset_after_log:
+                    buffer_diag.clear()
+
             if frame_id % max(1, config.LOG_EVERY_N_FRAMES) == 0:
                 raw_vis = stats["raw_visible"] / max(1.0, stats["total_points"]) * 100.0
                 filt_vis = stats["filtered_visible"] / max(1.0, stats["total_points"]) * 100.0
@@ -1145,37 +1190,6 @@ def main() -> None:
                     display_ts,
                     bp_txt,
                 )
-                diag_n = max(1.0, buffer_diag["samples"])
-                logger.info(
-                    "buffer_diag target=%.1fms actual_mean=%.1fms err_mean=%.1fms abs_err_mean=%.1fms "
-                    "on_target=%.1f%% tol=±%.1fms exact_match=%.1f%% no_pred=%.1f%% stale_drop=%.1f%% "
-                    "frame_delta_last=%d frame_delta_mean=%.2f infer_q=%d frame_buf_len=%d pred_buf_len=%d",
-                    requested_buffer_ms,
-                    buffer_diag["sum_actual_ms"] / diag_n,
-                    buffer_diag["sum_err_ms"] / diag_n,
-                    buffer_diag["sum_abs_err_ms"] / diag_n,
-                    100.0 * (buffer_diag["on_target"] / diag_n),
-                    buffer_tolerance_ms,
-                    100.0 * (buffer_diag["exact_match"] / diag_n),
-                    100.0 * (buffer_diag["no_pred"] / diag_n),
-                    100.0 * (buffer_diag["stale_drop"] / diag_n),
-                    frame_delta,
-                    (stats.get("frame_delta_sum", 0.0) / max(1.0, stats.get("frame_delta_count", 1.0))),
-                    infer_queue.qsize(),
-                    len(frame_buffer),
-                    len(preds_snapshot),
-                )
-                if buffer_diag["samples"] >= max(10.0, float(config.LOG_EVERY_N_FRAMES)) and (
-                    (buffer_diag["on_target"] / diag_n) < 0.3
-                ):
-                    logger.warning(
-                        "buffer_diag low on-target ratio: %.1f%% (target %.1fms, tol ±%.1fms). "
-                        "Likely bottleneck: frame buffer capacity, source jitter, or inference lag.",
-                        100.0 * (buffer_diag["on_target"] / diag_n),
-                        requested_buffer_ms,
-                        buffer_tolerance_ms,
-                    )
-
                 if getattr(config, "ENABLE_BENCHMARK_LOG_ROW", False):
                     path = Path(config.BENCHMARK_CSV_PATH)
                     with open(path, "a", newline="", encoding="utf-8") as f:

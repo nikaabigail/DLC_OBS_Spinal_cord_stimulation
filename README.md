@@ -98,6 +98,7 @@ python check_online_buffering.py summarize-csv --csv C:\\dlc\\DLC_OBS_Spinal_cor
 - `INFER_EVERY_N_FRAMES` и `TARGET_INFER_FPS`,
 - `USE_ROI` и `ROI` (фиксированный рабочий crop),
 - `DISPLAY_BUFFER_MS`, `MAX_FRAME_BUFFER`, `MAX_PRED_BUFFER`.
+- для online-контроля буфера: `BUFFER_DIAG_EVERY_N_FRAMES`, `BUFFER_DIAG_WARN_MIN_SAMPLES`, `BUFFER_DIAG_RESET_AFTER_LOG`.
 
 Логи realtime пишутся в:
 - `C:\dlc\DLC_OBS_Spinal_cord_stimulation\rt_dlc_debug.log`
