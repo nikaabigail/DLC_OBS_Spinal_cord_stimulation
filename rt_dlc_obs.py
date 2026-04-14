@@ -651,6 +651,7 @@ def draw_overlay(
     fps_dlc: float,
     skip_rate: float,
     hind_angle: Optional[float],
+    buffer_status_text: Optional[str],
     processing_active: bool,
     motion_score: float,
 ) -> np.ndarray:
@@ -680,6 +681,8 @@ def draw_overlay(
     # Угол всегда рисуем, если он вычислен: это нужно, чтобы запись совпадала с online-наблюдением.
     if hind_angle is not None:
         cv2.putText(out, f"Hind angle: {hind_angle:.1f}", (10, y0 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+    if buffer_status_text:
+        cv2.putText(out, buffer_status_text, (10, y0 + 50), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 220, 255), 2)
     return out
 
 def is_visual_mode() -> bool:
@@ -960,6 +963,7 @@ def main() -> None:
             frame_delta = display_frame_id - pred_frame_id if pred_frame_id >= 0 else -1
             display_buffer_ms_actual = (display_ts - display_packet.capture_ts) * 1000.0
             display_buffer_err_ms = display_buffer_ms_actual - requested_buffer_ms
+            buffer_on_target_now = abs(display_buffer_err_ms) <= buffer_tolerance_ms
             buffer_diag["samples"] += 1
             buffer_diag["sum_actual_ms"] += display_buffer_ms_actual
             buffer_diag["sum_err_ms"] += display_buffer_err_ms
@@ -975,6 +979,11 @@ def main() -> None:
             if frame_delta >= 0:
                 stats["frame_delta_sum"] += frame_delta
                 stats["frame_delta_count"] += 1
+            buffer_status_text = (
+                f"BUF {display_buffer_ms_actual:.1f}/{requested_buffer_ms:.1f}ms "
+                f"{'OK' if buffer_on_target_now else 'BAD'} "
+                f"delta_f={frame_delta}"
+            )
 
             # compute feature
             hind_angle = None
@@ -1036,6 +1045,7 @@ def main() -> None:
                 fps_dlc,
                 skip_rate,
                 hind_angle,
+                buffer_status_text,
                 processing_active,
                 motion_score,
             )

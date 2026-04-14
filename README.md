@@ -109,6 +109,7 @@ python check_online_buffering.py summarize-csv --csv C:\\dlc\\DLC_OBS_Spinal_cor
 - skip-счетчики по причинам (`skip_duplicate`, `skip_motion`, `skip_n`, `skip_fps`),
 - тайминги стадий (`t_capture`, `t_pre`, `t_infer`, `t_post`, `t_draw`, `t_disp`).
 - отдельная строка `buffer_diag` с контролем буферизации: `target`, `actual_mean`, `err_mean`, `abs_err_mean`, `%on_target`, `%exact_match`, `%no_pred`, `%stale_drop`, а также длины `infer_q/frame_buf/pred_buf`.
+- в overlay рядом с `Hind angle` рисуется текущий статус буфера: `BUF <actual>/<target>ms OK|BAD delta_f=<...>`.
 
 ## Что проверено и отполировано
 
