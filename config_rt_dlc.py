@@ -121,6 +121,15 @@ DESPIKE_RESET_GAP_FRAMES = 20
 # Логи / диагностика
 LOG_PATH = Path(r"C:\dlc\DLC_OBS_Spinal_cord_stimulation\rt_dlc_debug.log")
 LOG_EVERY_N_FRAMES = 30
+# Диагностика буферизации в runtime-логе:
+# 1 = писать buffer_diag каждый кадр (максимально подробно),
+# 5/10/30 = реже и легче для CPU/диска.
+BUFFER_DIAG_EVERY_N_FRAMES = 1
+# Минимум накопленных сэмплов перед warning о низком on-target.
+BUFFER_DIAG_WARN_MIN_SAMPLES = 30
+# True: после каждой строки buffer_diag сбрасывать окно агрегации.
+# False: кумулятивно с начала запуска.
+BUFFER_DIAG_RESET_AFTER_LOG = True
 # Диагностика триплета (raw/filt/draw/reason) может быть дорогой при логировании каждого кадра.
 # 0 = отключить периодический лог, >0 = писать раз в N кадров.
 TRIPLET_LOG_EVERY_N_FRAMES = 30
